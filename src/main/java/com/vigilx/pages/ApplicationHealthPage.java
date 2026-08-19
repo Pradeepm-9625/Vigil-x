@@ -3,6 +3,10 @@ package com.vigilx.pages;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.AriaRole;
+import com.microsoft.playwright.options.WaitForSelectorState;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /** Read-only navigation and visibility checks for the pages captured in the supplied recording. */
 public class ApplicationHealthPage extends BasePage {
@@ -10,98 +14,6 @@ public class ApplicationHealthPage extends BasePage {
 
     public boolean validateProjectHierarchy() { return openLinkAndCheck("Project Hierarchy", "Loading..."); }
     public boolean validateDevices() { return openLinkAndCheck("Devices", "Online"); }
-    public boolean validateAlerts() {
-        page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName("Alerts").setExact(false)).click();
-
-        Locator videoAlertButton = page.getByRole(AriaRole.BUTTON,
-                new Page.GetByRoleOptions().setName("Video Alert").setExact(false)).first();
-        if (videoAlertButton.count() == 0) {
-            return false;
-        }
-
-        try {
-            videoAlertButton.click();
-        } catch (Exception ignored) {
-            return false;
-        }
-
-        Locator allAlertEntries = page.locator("[role='row'], .alerts-v1-page, .alerts-v1-list-item, .alert-card")
-                .filter(new Locator.FilterOptions().setHasText("Video Alert"));
-
-        int alertCount = allAlertEntries.count();
-        if (alertCount == 0) {
-            return false;
-        }
-
-        int maxAlerts = Math.min(5, alertCount);
-        boolean anySuccess = false;
-
-        for (int i = 0; i < maxAlerts; i++) {
-            try {
-                Locator currentAlert = allAlertEntries.nth(i);
-                if (currentAlert.count() == 0) {
-                    continue;
-                }
-                currentAlert.click();
-
-                Locator previewButton = page.getByRole(AriaRole.BUTTON,
-                        new Page.GetByRoleOptions().setName("Preview").setExact(false)).first();
-                if (previewButton.count() > 0) {
-                    previewButton.click();
-                } else {
-                    Locator labelPreview = page.getByLabel("Preview").first();
-                    if (labelPreview.count() > 0) {
-                        labelPreview.click();
-                    }
-                }
-
-                Locator media = page.locator("video, canvas, [class*='player' i], [class*='video' i], [data-testid*='video' i], img[alt='Alert preview']").first();
-                boolean previewVisible = false;
-                try {
-                    previewVisible = media.isVisible();
-                } catch (Exception ignored) {
-                    try {
-                        previewVisible = page.getByAltText("Alert preview").first().isVisible();
-                    } catch (Exception ignored2) {
-                        previewVisible = false;
-                    }
-                }
-
-                if (previewVisible) {
-                    anySuccess = true;
-                }
-
-                Locator closePreview = page.getByLabel("Close slider popup").first();
-                if (closePreview.count() > 0) {
-                    closePreview.click();
-                } else {
-                    Locator closeDialog = page.getByRole(AriaRole.BUTTON,
-                            new Page.GetByRoleOptions().setName("Close dialog").setExact(false)).first();
-                    if (closeDialog.count() > 0) {
-                        closeDialog.click();
-                    }
-                }
-            } catch (Exception ignored) {
-                try {
-                    Locator closePreview = page.getByLabel("Close slider popup").first();
-                    if (closePreview.count() > 0) {
-                        closePreview.click();
-                    } else {
-                        Locator closeDialog = page.getByRole(AriaRole.BUTTON,
-                                new Page.GetByRoleOptions().setName("Close dialog").setExact(false)).first();
-                        if (closeDialog.count() > 0) {
-                            closeDialog.click();
-                        }
-                    }
-                } catch (Exception ignoredClose) {
-                    // Continue to next alert when the video is unavailable or the preview cannot be opened.
-                }
-            }
-        }
-
-        return anySuccess;
-    }
-
 
     public boolean validateUsersAndRoles() { return openTextNavigationAndCheck("Users & Roles", "User Management"); }
     public boolean validateOrganisation() { return openTextNavigationAndCheck("Organisation", "Organization Information"); }
@@ -122,23 +34,88 @@ public class ApplicationHealthPage extends BasePage {
         return page.locator(".device-config-v1-page__body").isVisible();
     }
 
-    public boolean validateLiveView(String baseUrl) {
-        page.navigate(baseUrl + "/live-views/views/v1");
-        return page.locator(".operator-panel__body").isVisible();
+    /** Runs after Devices and Device Tabs: opens Alerts V1 and validates the Video Alert playback. */
+    public boolean validateAlerts(String baseUrl, Path screenshotPath) {
+        return new alert(page).validateAlerts(baseUrl, screenshotPath);
     }
 
-    public boolean validateMap(String baseUrl) {
-        page.navigate(baseUrl + "/live-views/maps");
-        return page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Device").setExact(true)).isVisible();
+    public boolean validateLiveView(String baseUrl) {
+        return new Live_view(page).validateLiveView(baseUrl);
+    }
+
+   
+        public boolean validateMap(String baseUrl) {
+                return new Map(page).validateMap(baseUrl);
+        }
+
+        /** Robust map/marker/stream validation. Additional to {@link #validateMap}, which is unchanged. */
+        public boolean validateMapCameras(String baseUrl) {
+                return new MapValidation(page).validateMap(baseUrl);
+        }
+
+        private boolean validateCameraStream(Locator cameraCell, int cameraNumber, Path screenshotDir) {
+                try {
+                        Locator media = cameraCell.locator("video, canvas, [class*='video' i], [class*='player' i]").first();
+                        if (media.count() == 0) {
+                                captureLiveViewScreenshot(screenshotDir, "camera-" + cameraNumber + "-no-media");
+                                return false;
+                        }
+
+                        media.waitFor(new Locator.WaitForOptions()
+                                        .setState(WaitForSelectorState.VISIBLE)
+                                        .setTimeout(15000));
+
+                        String tagName = media.evaluate("element => element.tagName.toLowerCase()").toString();
+                        if ("video".equals(tagName)) {
+                                String source = media.evaluate("element => element.currentSrc || element.src || ''").toString();
+                                if (source.isBlank()) {
+                                        captureLiveViewScreenshot(screenshotDir, "camera-" + cameraNumber + "-no-source");
+                                        return false;
+                                }
+
+                                media.evaluate("element => { element.muted = true; element.play(); }");
+                                page.waitForTimeout(1000);
+                                boolean playing = (Boolean) media.evaluate(
+                                                "element => !element.paused && !element.ended && element.currentTime > 0");
+                                if (!playing) {
+                                        captureLiveViewScreenshot(screenshotDir, "camera-" + cameraNumber + "-not-playing");
+                                        return false;
+                                }
+                        }
+
+                        return true;
+                } catch (Exception exception) {
+                        captureLiveViewScreenshot(screenshotDir, "camera-" + cameraNumber + "-exception");
+                        return false;
+                }
+        }
+
+        private void captureLiveViewScreenshot(Path screenshotDir, String name) {
+                try {
+                        Files.createDirectories(screenshotDir);
+                        Path screenshotPath = screenshotDir.resolve(name + ".png");
+                        page.screenshot(new Page.ScreenshotOptions()
+                                        .setPath(screenshotPath)
+                                        .setFullPage(true));
+                        System.out.println("[SCREENSHOT] Live View failure saved to " + screenshotPath);
+                } catch (Exception exception) {
+                        System.err.println("[SCREENSHOT FAILURE] Could not save Live View screenshot: "
+                                        + exception.getMessage());
+                }
+        }
+
+    /** Robust archive/add-camera/playback validation. Additional to {@link #validateArchive}, which is unchanged. */
+    public boolean validateArchiveCameras(String baseUrl) {
+        return new ArchiveValidation(page).validateArchive(baseUrl);
     }
 
     public boolean validateArchive(String baseUrl) {
-        page.navigate(baseUrl + "/live-views/archive");
+        navigateTo(baseUrl + "/live-views/archive");
         return page.getByText("Camera 7008", new Page.GetByTextOptions().setExact(true)).isVisible();
     }
 
     public boolean addCameraToPlayback(String baseUrl, String cameraName) {
-        page.navigate(baseUrl + "/live-views/archive");
+        navigateTo(baseUrl + "/live-views/archive");
 
         // Keep the existing archive behavior intact: first ensure the page is actually loaded.
         boolean pageReady = page.getByText("Camera 7008", new Page.GetByTextOptions().setExact(false)).first().isVisible()
@@ -199,6 +176,7 @@ public class ApplicationHealthPage extends BasePage {
         try {
             page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName(linkName).setExact(false))
                     .click(new Locator.ClickOptions().setTimeout(2000));
+            waitAfterPageNavigation();
         } catch (Exception ignored) {
             return false;
         }
@@ -214,6 +192,7 @@ public class ApplicationHealthPage extends BasePage {
         try {
             page.getByText(navigationText, new Page.GetByTextOptions().setExact(false)).first()
                     .click(new Locator.ClickOptions().setTimeout(2000));
+            waitAfterPageNavigation();
         } catch (Exception ignored) {
             return false;
         }

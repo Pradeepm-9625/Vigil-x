@@ -25,6 +25,8 @@ public class SoakResult {
     public String error;
     public String screenshot;
     public String trace;
+    /** Relative path to this execution's consolidated API failure document, when one was written. */
+    public String apiFailureLog;
     public Map<String, String> pageResults = new LinkedHashMap<>();
     public List<String> apiFailures = new ArrayList<>();
     public List<String> streamFailures = new ArrayList<>();

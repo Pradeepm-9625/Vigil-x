@@ -4,6 +4,10 @@
 
 <suite name="VigilX Automation Suite">
 
+    <listeners>
+        <listener class-name="com.vigilx.listeners.TestListener"/>
+    </listeners>
+
     <test name="Smoke Test">
 
         <classes>

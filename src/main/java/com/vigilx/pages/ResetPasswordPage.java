@@ -92,6 +92,7 @@ public class ResetPasswordPage extends BasePage {
         logger.info("Clicking Reset Password");
 
         actions.click(btnResetPassword);
+        waitAfterPageNavigation();
 
         return new LoginPage(page);
 

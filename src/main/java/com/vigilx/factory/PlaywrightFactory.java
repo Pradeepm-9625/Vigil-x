@@ -6,6 +6,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.vigilx.config.ConfigReader;
+import com.vigilx.monitoring.ApiMonitor;
 
 public final class PlaywrightFactory {
 
@@ -74,10 +75,17 @@ public final class PlaywrightFactory {
                 new Browser.NewContextOptions()
                         .setViewportSize(1920,1080));
 
+        // Attached before the first page exists, so no request can be missed and popups/new pages
+        // opened later are covered too.
+        ApiMonitor.attach(browserContext);
+
         page = browserContext.newPage();
 
         page.setDefaultTimeout(
                 ConfigReader.getInt("timeout"));
+
+        // No page-level attach here: the context listener above already covers this page, and
+        // registering both would count every response twice.
 
         return page;
 
@@ -96,6 +104,9 @@ public final class PlaywrightFactory {
     }
 
     public static void closeBrowser() {
+
+        // Written before teardown so the consolidated report survives a failing close().
+        ApiMonitor.writeReportQuietly();
 
         if(browserContext!=null)
             browserContext.close();
