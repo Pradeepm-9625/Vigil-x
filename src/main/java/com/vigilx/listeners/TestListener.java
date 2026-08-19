@@ -1,8 +1,11 @@
 package com.vigilx.listeners;
 
+import org.apache.logging.log4j.Logger;
 import org.testng.ITestContext;
 import org.testng.ITestListener;
 import org.testng.ITestResult;
+
+import com.vigilx.utils.LoggerUtils;
 
 /**
  * TestNG Listener
@@ -11,38 +14,54 @@ import org.testng.ITestResult;
  */
 public class TestListener implements ITestListener {
 
+    private static final Logger LOGGER = LoggerUtils.getLogger(TestListener.class);
+
     @Override
     public void onStart(ITestContext context) {
-        System.out.println("========================================");
-        System.out.println("Test Execution Started");
-        System.out.println("Suite : " + context.getName());
-        System.out.println("========================================");
+        LOGGER.info("TEST SUITE STARTED | suite={}", context.getName());
     }
 
     @Override
     public void onFinish(ITestContext context) {
-        System.out.println("========================================");
-        System.out.println("Test Execution Completed");
-        System.out.println("========================================");
+        LOGGER.info("TEST SUITE COMPLETED | suite={} | passed={} | failed={} | skipped={}",
+                context.getName(),
+                context.getPassedTests().size(),
+                context.getFailedTests().size(),
+                context.getSkippedTests().size());
     }
 
     @Override
     public void onTestStart(ITestResult result) {
-        System.out.println("START : " + result.getMethod().getMethodName());
+        result.setAttribute("startTime", System.currentTimeMillis());
+        LOGGER.info("TEST STARTED | class={} | method={} | description={}",
+                result.getTestClass().getName(),
+                result.getMethod().getMethodName(),
+                result.getMethod().getDescription());
     }
 
     @Override
     public void onTestSuccess(ITestResult result) {
-        System.out.println("PASS  : " + result.getMethod().getMethodName());
+        LOGGER.info("TEST PASSED | class={} | method={} | durationMs={}",
+                result.getTestClass().getName(), result.getMethod().getMethodName(), durationMs(result));
     }
 
     @Override
     public void onTestFailure(ITestResult result) {
-        System.out.println("FAIL  : " + result.getMethod().getMethodName());
+        LOGGER.error("TEST FAILED | class={} | method={} | durationMs={}",
+                result.getTestClass().getName(), result.getMethod().getMethodName(), durationMs(result),
+                result.getThrowable());
     }
 
     @Override
     public void onTestSkipped(ITestResult result) {
-        System.out.println("SKIP  : " + result.getMethod().getMethodName());
+        LOGGER.warn("TEST SKIPPED | class={} | method={} | durationMs={}",
+                result.getTestClass().getName(), result.getMethod().getMethodName(), durationMs(result));
+    }
+
+    private long durationMs(ITestResult result) {
+        Object startTime = result.getAttribute("startTime");
+        return startTime instanceof Long
+                ? System.currentTimeMillis() - (Long) startTime
+                : result.getEndMillis() - result.getStartMillis();
     }
 }

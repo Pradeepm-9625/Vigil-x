@@ -114,6 +114,7 @@ public class OTPPage extends BasePage {
         logger.info("Clicking Verify");
 
         actions.click(btnVerify);
+        waitAfterPageNavigation();
 
         return new ResetPasswordPage(page);
 
@@ -134,6 +135,7 @@ public class OTPPage extends BasePage {
         logger.info("Clicking Back");
 
         actions.click(btnBack);
+        waitAfterPageNavigation();
 
         return new ForgotPasswordPage(page);
 

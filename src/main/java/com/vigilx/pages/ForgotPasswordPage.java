@@ -77,6 +77,7 @@ public class ForgotPasswordPage extends BasePage {
         logger.info("Clicking Send Verification Code");
 
         actions.click(btnSendVerificationCode);
+        waitAfterPageNavigation();
 
         return new OTPPage(page);
 
@@ -87,6 +88,7 @@ public class ForgotPasswordPage extends BasePage {
         logger.info("Clicking Back Button");
 
         actions.click(btnBack);
+        waitAfterPageNavigation();
 
         return new LoginPage(page);
 

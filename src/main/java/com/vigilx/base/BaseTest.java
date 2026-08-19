@@ -6,6 +6,7 @@ import org.testng.annotations.BeforeMethod;
 import com.microsoft.playwright.Page;
 import com.vigilx.config.ConfigReader;
 import com.vigilx.factory.PlaywrightFactory;
+import com.vigilx.utils.WaitUtils;
 
 /**
  * BaseTest
@@ -28,6 +29,7 @@ public class BaseTest {
 
         // Navigate to application
         page.navigate(ConfigReader.get("base.url"));
+        WaitUtils.waitAfterPageNavigation(page);
 
     }
 

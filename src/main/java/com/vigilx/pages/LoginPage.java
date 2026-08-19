@@ -123,6 +123,7 @@ public class LoginPage extends BasePage {
     actions.click(lnkForgotPassword);
 
     page.waitForLoadState();
+    waitAfterPageNavigation();
 
     return new ForgotPasswordPage(page);
 }
@@ -141,6 +142,7 @@ public class LoginPage extends BasePage {
     clickLogin();
 
     page.waitForURL("**/dashboard");
+    waitAfterPageNavigation();
 
     logger.info("Successfully navigated to Dashboard Page.");
 
