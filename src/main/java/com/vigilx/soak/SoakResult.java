@@ -21,7 +21,18 @@ public class SoakResult {
     public Long playbackStartupTimeMs;
     public String alerts = "SKIPPED";
     public String logout = "SKIPPED";
+    /** The application's health as this run found it: PASS, or FAIL if any validation failed. */
     public String overall = "FAIL";
+    /**
+     * Whether the automation itself ran to a normal end: "COMPLETED" (default) once every configured
+     * validation was attempted, logout ran, the browser closed and reports were written - regardless
+     * of {@link #overall}. Only set to "ERROR" for a genuine infrastructure/framework problem the run
+     * could not isolate (browser crash, Playwright init failure, an unexpected bug, ...), as opposed
+     * to the application itself being unhealthy. See {@link #executionError} for that case's detail.
+     */
+    public String executionStatus = "COMPLETED";
+    /** Set only when {@link #executionStatus} is "ERROR": the infrastructure exception's message. */
+    public String executionError;
     public String error;
     public String screenshot;
     public String trace;

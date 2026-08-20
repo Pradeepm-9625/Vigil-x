@@ -36,7 +36,44 @@ public class ArchiveValidation extends BasePage {
     private static final int DEFAULT_TREE_TIMEOUT_MS = 30000;
 
     private static final double PLAYBACK_TOLERANCE_SECONDS = 0.2;
-    private static final int PLAYBACK_SAMPLE_MS = 3000;
+
+    /** How long the recording must keep progressing for; overridable via archive.playback.monitor.seconds. */
+    private static final int DEFAULT_MONITOR_SECONDS = 30;
+    /** Poll cadence during that window; overridable via archive.playback.monitor.interval.ms. */
+    private static final int DEFAULT_MONITOR_INTERVAL_MS = 2000;
+    /** Consecutive non-progressing samples tolerated before the stream counts as stalled. */
+    private static final int DEFAULT_MONITOR_STALL_SAMPLES = 3;
+
+    /** Markers that mean "this device is usable"; overridable via archive.online.pattern. */
+    private static final String DEFAULT_ONLINE_PATTERN =
+            "online|connected|streaming|recording|status[-_]?(ok|up|green|online)";
+
+    /** Markers that mean "do not pick this device"; overridable via archive.offline.pattern. */
+    private static final String DEFAULT_OFFLINE_PATTERN =
+            "offline|disconnected|unreachable|unavailable|inactive|not\\s*connected|no\\s*signal"
+                    + "|status[-_]?(off|down|red|offline)";
+
+    /** Walks a checkbox up to its own tree row and returns that row's markup, minus child rows. */
+    private static final String ROW_SIGNATURE_SCRIPT =
+            "el => {"
+                    + "  const row = el.closest(\"li, [role='treeitem'], .MuiTreeItem-root,"
+                    + " .ph-v1-dynamic-tree-node\") || el.parentElement || el;"
+                    + "  const clone = row.cloneNode(true);"
+                    + "  clone.querySelectorAll(\"ul, [role='group']\")"
+                    + "       .forEach(child => child.remove());"
+                    + "  return (clone.outerHTML || '').slice(0, 4000);"
+                    + "}";
+
+    /** Same row-walk as {@link #ROW_SIGNATURE_SCRIPT}, but returns visible text instead of markup. */
+    private static final String ROW_TEXT_SCRIPT =
+            "el => {"
+                    + "  const row = el.closest(\"li, [role='treeitem'], .MuiTreeItem-root,"
+                    + " .ph-v1-dynamic-tree-node\") || el.parentElement || el;"
+                    + "  const clone = row.cloneNode(true);"
+                    + "  clone.querySelectorAll(\"ul, [role='group']\")"
+                    + "       .forEach(child => child.remove());"
+                    + "  return (clone.textContent || '').slice(0, 200);"
+                    + "}";
 
     private final Path screenshotDirectory;
     private final int treeTimeoutMs;
@@ -131,8 +168,13 @@ public class ArchiveValidation extends BasePage {
                 return finish(report);
             }
 
-            // STEP 8 - random selection keeps a long soak from always testing the same camera
-            TreeDevice device = selectRandomly(devices);
+            // STEP 8 - random selection among the online devices keeps a long soak from always
+            // testing the same camera without ever landing on an offline one.
+            TreeDevice device = selectRandomOnlineDevice(devices);
+            if (device == null) {
+                fail(report, "No online device available in the device tree", "no-online-devices");
+                return finish(report);
+            }
             report.selectedDevice = device.name();
             deviceForCorrelation = device.name();
 
@@ -329,10 +371,82 @@ public class ArchiveValidation extends BasePage {
     // ---------------------------------------------------------------------
 
     /**
-     * Applies the "Active" device filter when the UI exposes one. A missing filter is reported but
-     * not treated as a failure, since the validation can still proceed across all devices.
+     * Applies the "Active" device filter: opens the "Camera filters" panel, sets "Filter Status" to
+     * Active via its native {@code <select>}, then closes the panel again.
+     *
+     * <p>Confirmed against the real Add Cameras dialog: the "Camera filters" trigger opens a panel
+     * with three selects (Filter Hierarchy / Filter Status / Filter Tags); "Filter Status" is the one
+     * with All/Active/Inactive. A missing filter is reported but not treated as a failure, since the
+     * validation can still proceed across all devices.
      */
     private boolean applyActiveFilter() {
+        if (openCameraFiltersPanel() && selectFilterStatusActive()) {
+            closeCameraFiltersPanel();
+            page.waitForTimeout(1000);
+            System.out.println("[PASS] Active device filter applied via Filter Status.");
+            return true;
+        }
+        closeCameraFiltersPanel();
+        return applyActiveFilterFallback();
+    }
+
+    /** Clicks the visible "Camera filters" trigger and waits for its panel to render. */
+    private boolean openCameraFiltersPanel() {
+        Locator triggers = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Camera filters").setExact(true));
+        int count = triggers.count();
+        for (int index = 0; index < count; index++) {
+            try {
+                Locator trigger = triggers.nth(index);
+                if (!trigger.isVisible()) {
+                    continue;
+                }
+                trigger.click(new Locator.ClickOptions().setTimeout(5000));
+                page.getByText("Filter Status", new Page.GetByTextOptions().setExact(true))
+                        .waitFor(new Locator.WaitForOptions()
+                                .setState(WaitForSelectorState.VISIBLE)
+                                .setTimeout(5000));
+                return true;
+            } catch (Exception ignored) {
+                // The Archive page's own "Camera filters" button is obscured behind this dialog;
+                // try the next match rather than the same hidden one.
+            }
+        }
+        System.out.println("[INFO] No visible \"Camera filters\" trigger found.");
+        return false;
+    }
+
+    /** Selects "Active" from the native select under the "Filter Status" label. */
+    private boolean selectFilterStatusActive() {
+        try {
+            Locator select = page.getByText("Filter Status", new Page.GetByTextOptions().setExact(true))
+                    .locator("xpath=following::select[1]");
+            select.selectOption("Active");
+            page.waitForTimeout(1000);
+            String value = String.valueOf(select.evaluate("element => element.value"));
+            return value.equalsIgnoreCase("active");
+        } catch (Exception exception) {
+            System.err.println("[WARN] Could not select Active from Filter Status: " + exception.getMessage());
+            return false;
+        }
+    }
+
+    /** Closes the filter panel opened by {@link #openCameraFiltersPanel()}; best-effort. */
+    private void closeCameraFiltersPanel() {
+        try {
+            Locator close = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Close filter").setExact(true));
+            if (close.count() > 0 && close.first().isVisible()) {
+                close.first().click(new Locator.ClickOptions().setTimeout(3000));
+                page.waitForTimeout(500);
+            }
+        } catch (Exception ignored) {
+            // Not fatal: the dialog can still be used with the filter panel left open.
+        }
+    }
+
+    /** Older, broader heuristic kept as a fallback for deployments without the panel above. */
+    private boolean applyActiveFilterFallback() {
         java.util.regex.Pattern active =
                 java.util.regex.Pattern.compile("^\\s*active\\s*$", java.util.regex.Pattern.CASE_INSENSITIVE);
 
@@ -345,7 +459,7 @@ public class ArchiveValidation extends BasePage {
                 if (control.count() > 0 && control.isVisible()) {
                     control.click(new Locator.ClickOptions().setTimeout(5000));
                     page.waitForTimeout(1500);
-                    System.out.println("[PASS] Active device filter applied via " + role + ".");
+                    System.out.println("[PASS] Active device filter applied via " + role + " (fallback).");
                     return true;
                 }
             } catch (Exception ignored) {
@@ -378,6 +492,13 @@ public class ArchiveValidation extends BasePage {
                     continue;
                 }
 
+                // The tree also carries a checkbox on each site/node folder (selects every camera
+                // under it). Confirmed live: picking one saves fine but nothing ever reaches the
+                // playback tile, since a folder is not a stream. Only real camera rows count.
+                if (!isDeviceRow(index)) {
+                    continue;
+                }
+
                 String name = deviceName(checkbox, index);
                 devices.add(new TreeDevice(name, index));
 
@@ -404,9 +525,25 @@ public class ArchiveValidation extends BasePage {
             // Fall through.
         }
         try {
-            String text = checkbox.locator("xpath=ancestor::*[self::li or self::div][1]").first().textContent();
+            // The nearest ancestor <div> is just an icon wrapper with no text; the label lives in
+            // ".ph-v1-dynamic-tree-node__label" further up the same tree row. Reading the row's own
+            // <li role="treeitem"> instead of the first ancestor div is what actually reaches it.
+            String text = checkbox.locator(
+                    "xpath=ancestor::*[@role='treeitem' or self::li][1]//*[contains(@class,'ph-v1-dynamic-tree-node__label')]")
+                    .first().textContent();
             if (text != null && !text.isBlank()) {
                 return text.trim().replaceAll("\\s+", " ");
+            }
+        } catch (Exception ignored) {
+            // Fall through.
+        }
+        try {
+            // Generic fallback for deployments without that label class: the row's own text, minus
+            // any nested child rows so a parent's name is never padded with its children's names.
+            Object text = checkbox.evaluate(ROW_TEXT_SCRIPT);
+            String value = text == null ? "" : text.toString().trim().replaceAll("\\s+", " ");
+            if (!value.isBlank()) {
+                return value;
             }
         } catch (Exception ignored) {
             // Fall through.
@@ -422,6 +559,156 @@ public class ArchiveValidation extends BasePage {
         System.out.println("Seed     : " + seed + "   (set archive.validation.random.seed to reproduce)");
         System.out.println("Selected : " + device.name() + " (checkbox index " + device.checkboxIndex() + ")");
         return device;
+    }
+
+    // ---------------------------------------------------------------------
+    // STEP 8b - online-only selection
+    // ---------------------------------------------------------------------
+
+    /**
+     * Random selection restricted to the devices the tree reports as online.
+     *
+     * <p>Additional to {@link #selectRandomly(List)}, which is left untouched: this only narrows the
+     * candidate list and then delegates to it, so the seeded/reproducible behaviour is unchanged.
+     * If nothing can be confirmed online the full list is used again, so a deployment whose tree
+     * carries no status markers degrades to the previous behaviour instead of failing the soak.
+     *
+     * @return the chosen device, or {@code null} when {@code devices} is empty
+     */
+    private TreeDevice selectRandomOnlineDevice(List<TreeDevice> devices) {
+        if (devices == null || devices.isEmpty()) {
+            return null;
+        }
+        if (!boolConfig("archive.online.only", true)) {
+            return selectRandomly(devices);
+        }
+
+        List<TreeDevice> online = filterOnlineDevices(devices);
+        System.out.println("[INFO] Online devices: " + online.size() + " of " + devices.size());
+
+        if (online.isEmpty()) {
+            System.out.println("[WARN] No device could be confirmed online; "
+                    + "falling back to the full device list.");
+            return selectRandomly(devices);
+        }
+        return selectRandomly(online);
+    }
+
+    /** Keeps only the devices whose own tree row does not advertise an offline state. */
+    private List<TreeDevice> filterOnlineDevices(List<TreeDevice> devices) {
+        List<TreeDevice> online = new ArrayList<>();
+        for (TreeDevice device : devices) {
+            if (isOnline(device)) {
+                online.add(device);
+            } else {
+                System.out.println("[SKIP] Offline device: " + device.name()
+                        + " (checkbox index " + device.checkboxIndex() + ")");
+            }
+        }
+        return online;
+    }
+
+    /**
+     * Status verdict for one tree row. Offline markers win over online markers, and a row that
+     * advertises neither counts as online unless {@code archive.online.strict} is enabled.
+     *
+     * <p>Checks the device-status icon's own {@code aria-label} first (confirmed on the real tree:
+     * {@code <div aria-label="Device is online">} sits next to the checkbox) before falling back to
+     * the broader row-signature regex, which stays as the safety net for deployments that label the
+     * icon differently.
+     */
+    private boolean isOnline(TreeDevice device) {
+        boolean unknownIsOnline = !boolConfig("archive.online.strict", false);
+
+        String iconLabel = statusIconLabel(device.checkboxIndex());
+        if (!iconLabel.isBlank()) {
+            if (iconLabel.contains("offline")) {
+                return false;
+            }
+            if (iconLabel.contains("online")) {
+                return true;
+            }
+        }
+
+        String signature = statusSignature(device.checkboxIndex());
+        if (signature.isBlank()) {
+            return unknownIsOnline;
+        }
+        if (pattern("archive.offline.pattern", DEFAULT_OFFLINE_PATTERN).matcher(signature).find()) {
+            return false;
+        }
+        if (pattern("archive.online.pattern", DEFAULT_ONLINE_PATTERN).matcher(signature).find()) {
+            return true;
+        }
+        return unknownIsOnline;
+    }
+
+    /**
+     * True when this tree row is an actual camera, not a site/node folder. Folder rows carry a
+     * checkbox too (selects every camera under them) but neither the online/offline status icon nor
+     * the device-icon image that every real camera row has.
+     */
+    private boolean isDeviceRow(int checkboxIndex) {
+        try {
+            Object isDevice = page.getByRole(AriaRole.CHECKBOX).nth(checkboxIndex)
+                    .evaluate("el => {"
+                            + "  const row = el.closest(\"li, [role='treeitem']\") || el.parentElement;"
+                            + "  if (!row) return true;"
+                            + "  return !!row.querySelector('[aria-label*=\"online\" i], [aria-label*=\"offline\" i],"
+                            + " .ph-v1-dynamic-tree-node__device-icon');"
+                            + "}");
+            return !Boolean.FALSE.equals(isDevice);
+        } catch (Exception exception) {
+            // Fail open: a read error should not silently shrink the candidate pool.
+            return true;
+        }
+    }
+
+    /** {@code aria-label} of the row's own online/offline status icon (e.g. "Device is online"), if any. */
+    private String statusIconLabel(int checkboxIndex) {
+        try {
+            Object label = page.getByRole(AriaRole.CHECKBOX).nth(checkboxIndex)
+                    .evaluate("el => {"
+                            + "  const row = el.closest(\"li, [role='treeitem']\") || el.parentElement;"
+                            + "  const icon = row ? row.querySelector('[aria-label*=\"online\" i], [aria-label*=\"offline\" i]') : null;"
+                            + "  return icon ? icon.getAttribute('aria-label') : '';"
+                            + "}");
+            return label == null ? "" : label.toString().toLowerCase(Locale.ROOT);
+        } catch (Exception exception) {
+            return "";
+        }
+    }
+
+    /**
+     * Markup of the device's own tree row - visible text plus classes, titles and data attributes,
+     * which is where status dots hide - with nested child rows stripped so a parent node is never
+     * judged by its children. Returns an empty string when the row cannot be read.
+     */
+    private String statusSignature(int checkboxIndex) {
+        try {
+            Object signature = page.getByRole(AriaRole.CHECKBOX).nth(checkboxIndex)
+                    .evaluate(ROW_SIGNATURE_SCRIPT);
+            return signature == null ? "" : signature.toString().toLowerCase(Locale.ROOT);
+        } catch (Exception exception) {
+            return "";
+        }
+    }
+
+    /** Compiles a configurable, case-insensitive marker pattern, falling back on a bad override. */
+    private java.util.regex.Pattern pattern(String key, String fallback) {
+        String configured = ConfigReader.getOrDefault(key, fallback);
+        String source = (configured == null || configured.isBlank()) ? fallback : configured.trim();
+        try {
+            return java.util.regex.Pattern.compile(source, java.util.regex.Pattern.CASE_INSENSITIVE);
+        } catch (Exception exception) {
+            System.err.println("[WARN] Invalid pattern for " + key + "; using the default.");
+            return java.util.regex.Pattern.compile(fallback, java.util.regex.Pattern.CASE_INSENSITIVE);
+        }
+    }
+
+    private boolean boolConfig(String key, boolean fallback) {
+        String value = ConfigReader.getOrDefault(key, String.valueOf(fallback));
+        return (value == null || value.isBlank()) ? fallback : Boolean.parseBoolean(value.trim());
     }
 
     // ---------------------------------------------------------------------
@@ -557,29 +844,99 @@ public class ArchiveValidation extends BasePage {
                 return;
             }
 
-            double startTime = ((Number) video.evaluate("element => element.currentTime")).doubleValue();
-            page.waitForTimeout(PLAYBACK_SAMPLE_MS);
-            double endTime = ((Number) video.evaluate("element => element.currentTime")).doubleValue();
-
-            boolean paused = (Boolean) video.evaluate("element => element.paused");
-            boolean ended = (Boolean) video.evaluate("element => element.ended");
-            boolean progressed = endTime > startTime + PLAYBACK_TOLERANCE_SECONDS;
-
-            if (paused || ended || !progressed) {
-                report.playback = "FAIL";
-                fail(report, "Recording did not play (paused=" + paused + ", ended=" + ended
-                        + ", currentTime " + startTime + " -> " + endTime + ")",
-                        slug(deviceName) + "-stream-failed");
-                return;
-            }
-
-            report.playback = "PASS";
-            report.passed = true;
+            monitorPlayback(video, report, deviceName);
 
         } catch (Exception exception) {
             fail(report, "Playback validation error: " + exception.getMessage(),
                     slug(deviceName) + "-playback-exception");
         }
+    }
+
+    /**
+     * Watches {@code video} for {@code archive.playback.monitor.seconds} (default 30s), polling every
+     * {@code archive.playback.monitor.interval.ms} (default 2s).
+     *
+     * <p>Replaces the single before/after snapshot this used to take: a camera that plays for three
+     * seconds and then stalls looked identical to a healthy one under that check. Each sample re-checks
+     * the element is still there, carries no media error, and that {@code currentTime} is still moving;
+     * {@code archive.playback.monitor.stall.samples} consecutive non-progressing samples end the check
+     * early as a stall rather than waiting out the full window.
+     */
+    private void monitorPlayback(Locator video, ArchiveReport report, String deviceName) {
+        long monitorMs = Math.max(1, intConfig("archive.playback.monitor.seconds", DEFAULT_MONITOR_SECONDS)) * 1000L;
+        long intervalMs = Math.max(500, intConfig("archive.playback.monitor.interval.ms", DEFAULT_MONITOR_INTERVAL_MS));
+        int maxStallSamples = Math.max(1, intConfig("archive.playback.monitor.stall.samples", DEFAULT_MONITOR_STALL_SAMPLES));
+
+        double startTime = ((Number) video.evaluate("element => element.currentTime")).doubleValue();
+        double lastTime = startTime;
+        int stallStreak = 0;
+        int samples = 0;
+
+        System.out.println("[INFO] Monitoring playback for " + (monitorMs / 1000)
+                + "s (interval " + intervalMs + "ms) - device: " + deviceName);
+
+        long deadline = System.currentTimeMillis() + monitorMs;
+        while (System.currentTimeMillis() < deadline) {
+            page.waitForTimeout(intervalMs);
+            samples++;
+
+            if (video.count() == 0 || !video.isVisible()) {
+                fail(report, "Playback video element became unavailable during monitoring (sample " + samples + ")",
+                        slug(deviceName) + "-video-lost");
+                return;
+            }
+
+            String sampleError = String.valueOf(video.evaluate(
+                    "element => element.error ? JSON.stringify({code: element.error.code, message: element.error.message}) : ''"));
+            if (sampleError != null && !sampleError.isBlank() && !"null".equals(sampleError)) {
+                fail(report, "Media error during monitoring (sample " + samples + "): " + sampleError,
+                        slug(deviceName) + "-monitor-media-error");
+                return;
+            }
+
+            boolean sampleEnded = (Boolean) video.evaluate("element => element.ended");
+            boolean samplePaused = (Boolean) video.evaluate("element => element.paused");
+            report.readyState = ((Number) video.evaluate("element => element.readyState")).intValue();
+            double sampleTime = ((Number) video.evaluate("element => element.currentTime")).doubleValue();
+            boolean sampleProgressed = sampleTime > lastTime + PLAYBACK_TOLERANCE_SECONDS;
+
+            System.out.println("[MONITOR] sample=" + samples + "/" + (monitorMs / intervalMs)
+                    + " currentTime=" + sampleTime + " readyState=" + report.readyState
+                    + " paused=" + samplePaused + " progressed=" + sampleProgressed);
+
+            if (sampleEnded) {
+                fail(report, "Recording ended before the " + (monitorMs / 1000) + "s monitoring window completed"
+                        + " (sample " + samples + ")", slug(deviceName) + "-ended-early");
+                return;
+            }
+
+            if (samplePaused || report.readyState < 2 || !sampleProgressed) {
+                stallStreak++;
+                if (stallStreak >= maxStallSamples) {
+                    fail(report, "Playback stalled: no progress for " + (stallStreak * intervalMs / 1000)
+                            + "s (paused=" + samplePaused + ", readyState=" + report.readyState + ")",
+                            slug(deviceName) + "-stalled");
+                    return;
+                }
+            } else {
+                stallStreak = 0;
+            }
+
+            lastTime = sampleTime;
+        }
+
+        double totalProgressed = lastTime - startTime;
+        if (totalProgressed <= PLAYBACK_TOLERANCE_SECONDS) {
+            report.playback = "FAIL";
+            fail(report, "Recording did not progress over the " + (monitorMs / 1000) + "s monitoring window"
+                    + " (currentTime " + startTime + " -> " + lastTime + ")", slug(deviceName) + "-no-progress");
+            return;
+        }
+
+        report.playback = "PASS";
+        report.passed = true;
+        System.out.println("[PASS] Playback progressed continuously for " + (monitorMs / 1000) + "s"
+                + " (currentTime " + startTime + " -> " + lastTime + ", " + samples + " sample(s)).");
     }
 
     // ---------------------------------------------------------------------

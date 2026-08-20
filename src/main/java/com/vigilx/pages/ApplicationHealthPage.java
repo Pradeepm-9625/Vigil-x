@@ -12,7 +12,19 @@ import java.nio.file.Path;
 public class ApplicationHealthPage extends BasePage {
     public ApplicationHealthPage(Page page) { super(page); }
 
-    public boolean validateProjectHierarchy() { return openLinkAndCheck("Project Hierarchy", "Loading..."); }
+    /**
+     * Opens Project Hierarchy and waits for the tree itself.
+     *
+     * <p>The check used to wait for the transient "Loading..." label, which is already gone once the
+     * tree has rendered - so a healthy page reported FAIL. The node search box and the Add Devices
+     * action belong to the loaded page and stay on screen.
+     */
+    public boolean validateProjectHierarchy() {
+        return openLinkAndCheck("Project Hierarchy",
+                page.getByPlaceholder("Search Node, Site, Devices")
+                        .or(page.getByRole(AriaRole.BUTTON,
+                                new Page.GetByRoleOptions().setName("Add Devices").setExact(false))));
+    }
     public boolean validateDevices() { return openLinkAndCheck("Devices", "Online"); }
 
     public boolean validateUsersAndRoles() { return openTextNavigationAndCheck("Users & Roles", "User Management"); }
@@ -109,18 +121,40 @@ public class ApplicationHealthPage extends BasePage {
         return new ArchiveValidation(page).validateArchive(baseUrl);
     }
 
+    /**
+     * Opens Archive and waits for the Playback workspace.
+     *
+     * <p>This used to assert that a camera literally named "Camera 7008" was on screen, which no
+     * environment except the one the flow was recorded on can satisfy. The workspace itself is what
+     * this read-only check is actually about; per-camera playback is covered by
+     * {@link #validateArchiveCameras(String)}.
+     */
     public boolean validateArchive(String baseUrl) {
         navigateTo(baseUrl + "/live-views/archive");
-        return page.getByText("Camera 7008", new Page.GetByTextOptions().setExact(true)).isVisible();
+        return isPlaybackWorkspaceReady();
+    }
+
+    /** True once the Archive/Playback workspace has rendered, whatever cameras it holds. */
+    private boolean isPlaybackWorkspaceReady() {
+        try {
+            page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Playback").setExact(true))
+                    .or(page.getByPlaceholder("Search Node, Site, Devices"))
+                    .first()
+                    .waitFor(new Locator.WaitForOptions()
+                            .setState(WaitForSelectorState.VISIBLE)
+                            .setTimeout(20000));
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[ARCHIVE] Playback workspace did not render: " + exception.getMessage());
+            return false;
+        }
     }
 
     public boolean addCameraToPlayback(String baseUrl, String cameraName) {
         navigateTo(baseUrl + "/live-views/archive");
 
         // Keep the existing archive behavior intact: first ensure the page is actually loaded.
-        boolean pageReady = page.getByText("Camera 7008", new Page.GetByTextOptions().setExact(false)).first().isVisible()
-                || page.getByText("vms smart city survilien", new Page.GetByTextOptions().setExact(false)).first().isVisible();
-        if (!pageReady) {
+        if (!isPlaybackWorkspaceReady()) {
             return false;
         }
 
@@ -170,6 +204,25 @@ public class ApplicationHealthPage extends BasePage {
         }
 
         return page.getByText(cameraName, new Page.GetByTextOptions().setExact(false)).first().isVisible();
+    }
+
+    /** Opens a left-nav link, then waits for an element that only the loaded page owns. */
+    private boolean openLinkAndCheck(String linkName, Locator expected) {
+        try {
+            page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName(linkName).setExact(false))
+                    .click(new Locator.ClickOptions().setTimeout(5000));
+            waitAfterPageNavigation();
+        } catch (Exception ignored) {
+            return false;
+        }
+        try {
+            expected.first().waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(15000));
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private boolean openLinkAndCheck(String linkName, String expectedText) {

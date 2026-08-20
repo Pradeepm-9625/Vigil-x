@@ -108,14 +108,24 @@ public final class PlaywrightFactory {
         // Written before teardown so the consolidated report survives a failing close().
         ApiMonitor.writeReportQuietly();
 
-        if(browserContext!=null)
+        // Idempotent: the soak run closes the browser as soon as logout ends, and its finally
+        // block calls this again. Every handle is dropped so the second call is a no-op.
+        if (browserContext != null) {
             browserContext.close();
+            browserContext = null;
+        }
 
-        if(browser!=null)
+        if (browser != null) {
             browser.close();
+            browser = null;
+        }
 
-        if(playwright!=null)
+        if (playwright != null) {
             playwright.close();
+            playwright = null;
+        }
+
+        page = null;
 
     }
 

@@ -75,6 +75,11 @@ public class Map extends BasePage {
         // 3. Find camera live buttons
         // ---------------------------------------------------------
 
+        // Markers start clustered - five cameras render as one "5 Cameras" pin - and the
+        // per-camera buttons exist only once the side panel is open and the clusters expanded.
+        // Without this the count below is zero on a perfectly healthy map.
+        MapValidation.revealMapDevices(page);
+
         Locator cameraButtons = page.getByRole(
                 AriaRole.BUTTON,
                 new Page.GetByRoleOptions()

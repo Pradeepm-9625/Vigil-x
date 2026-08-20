@@ -97,6 +97,11 @@ public final class SoakRunContext {
         return context;
     }
 
+    /** {@code target/soak-test}, the parent of every {@code run-<timestamp>} folder. */
+    public static Path root() {
+        return Paths.get(ROOT);
+    }
+
     public Path runDirectory() {
         return runDirectory;
     }
