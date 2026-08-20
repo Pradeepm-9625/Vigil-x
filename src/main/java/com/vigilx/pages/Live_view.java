@@ -99,6 +99,31 @@ public class Live_view extends BasePage {
         }
 
         // ---------------------------------------------------------
+        // 4b. Distinguish "view has no cameras" from "streams are broken"
+        // ---------------------------------------------------------
+
+        // A saved view with nothing assigned still renders empty "Add Camera" tiles. Checking each
+        // tile then reports a missing stream per tile, which reads as a broken streaming service
+        // rather than an unconfigured view.
+        int tilesWithMedia = page.locator("[role='gridcell'] video, [role='gridcell'] canvas").count();
+
+        if (tilesWithMedia == 0) {
+
+            System.err.println(
+                    "[FAIL] The opened Live View has no cameras assigned: "
+                            + cameraCount
+                            + " empty tile(s). Assign cameras to the default view before the soak run."
+            );
+
+            captureLiveViewScreenshot(
+                    screenshotDir,
+                    "view-has-no-cameras"
+            );
+
+            return false;
+        }
+
+        // ---------------------------------------------------------
         // 5. First validation
         // ---------------------------------------------------------
 

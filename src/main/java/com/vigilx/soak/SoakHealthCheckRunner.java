@@ -11,7 +11,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Tracing;
-import com.microsoft.playwright.options.AriaRole;
 import com.microsoft.playwright.options.ScreenshotType;
 import com.vigilx.config.ConfigReader;
 import com.vigilx.factory.PlaywrightFactory;
@@ -19,6 +18,7 @@ import com.vigilx.monitoring.ApiMonitor;
 import com.vigilx.monitoring.LiveViewMonitor;
 import com.vigilx.monitoring.PageApiTracker;
 import com.vigilx.pages.ApplicationHealthPage;
+import com.vigilx.reporting.SoakConsolidatedReportGenerator;
 import com.vigilx.reporting.SoakReporter;
 import com.vigilx.reporting.SoakRunContext;
 import com.vigilx.pages.DashboardPage;
@@ -35,6 +35,20 @@ public final class SoakHealthCheckRunner {
     private static final java.util.concurrent.atomic.AtomicInteger ITERATION =
             new java.util.concurrent.atomic.AtomicInteger();
     private SoakHealthCheckRunner() { }
+
+    /**
+     * Marks "every configured validation ran and the application was found unhealthy" - as opposed to
+     * a genuine infrastructure/framework problem. Thrown only by the two checks at the end of the try
+     * block below, after every validation, logout and browser cleanup has already completed; the
+     * catch block uses the type (not the message) to tell the two apart, so {@link SoakResult#overall}
+     * still ends up "FAIL" exactly as before while {@link SoakResult#executionStatus} stays
+     * "COMPLETED" instead of being misreported as an execution error.
+     */
+    private static final class SoakValidationFailedException extends RuntimeException {
+        SoakValidationFailedException(String message) {
+            super(message);
+        }
+    }
 
     public static SoakResult runOnce() {
         SoakTestConfig config = SoakTestConfig.load();
@@ -82,12 +96,20 @@ public final class SoakHealthCheckRunner {
                 Path alertScreenshot = evidence.resolve("screenshots/video-alert-failure.png");
                 LOG.info("[SOAK] Alerts V1 and Video Alert validation started");
                 boolean alertPassed = healthPages.validateAlerts(appUrl, alertScreenshot);
-                result.pageResults.put("Alerts V1 and Video Alert", alertPassed ? "PASS" : "FAIL");
-                LOG.info("[SOAK] Alerts V1 and Video Alert validation completed | status={}",
-                        alertPassed ? "PASS" : "FAIL");
+                // soak.alert.required=false was never honoured: a video alert that carries only
+                // images still failed the whole run. The status must not start with FAIL, since
+                // that is what marks the run failed further down.
+                String alertStatus = alertPassed ? "PASS"
+                        : config.alertRequired() ? "FAIL"
+                                : "WARN: Video Alert validation failed (soak.alert.required=false)";
+                result.alerts = alertPassed ? "PASS" : config.alertRequired() ? "FAIL" : "WARN";
+                result.pageResults.put("Alerts V1 and Video Alert", alertStatus);
+                LOG.info("[SOAK] Alerts V1 and Video Alert validation completed | status={}", alertStatus);
                 if (!alertPassed) {
                     result.screenshot = "screenshots/video-alert-failure.png";
-                    result.error = appendError(result.error, "Video Alert validation failed");
+                    if (config.alertRequired()) {
+                        result.error = appendError(result.error, "Video Alert validation failed");
+                    }
                 }
             }
             validatePage(page, result, "Settings", healthPages::validateSettings);
@@ -122,19 +144,16 @@ public final class SoakHealthCheckRunner {
             validatePage(page, result, "Map", () -> healthPages.validateMap(appUrl));
             validatePage(page, result, "Map Camera Validation", () -> healthPages.validateMapCameras(appUrl));
             validatePage(page, result, "Archive", () -> healthPages.validateArchive(appUrl));
+            // Archive Camera Validation already does the whole flow in one pass: open Add Camera,
+            // filter to Active, pick one random online device, add it once, then watch its stream for
+            // the full monitoring window. This used to be followed by a second addCameraToPlayback()
+            // call that added a different, hardcoded camera on top of it, then a third re-navigation
+            // to Archive that only checked the "Playback" heading was visible - not the stream itself.
+            // One add, one watch, one verdict.
+            long playbackStarted = System.nanoTime();
             validatePage(page, result, "Archive Camera Validation", () -> healthPages.validateArchiveCameras(appUrl));
             if (config.playbackEnabled()) {
-                String cameraName = config.cameraName();
-                healthPages.addCameraToPlayback(appUrl, cameraName);
-            }
-            page.waitForTimeout(2000);
-            if (config.playbackEnabled()) {
-                long playbackStarted = System.nanoTime();
-                String id = config.cameraId().isBlank() ? "" : "?cameras=" + config.cameraId();
-                page.navigate(appUrl + "/live-views/archive" + id);
-                WaitUtils.waitAfterPageNavigation(page);
-                page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Playback").setExact(true)).waitFor();
-                result.playback = "PASS";
+                result.playback = "PASS".equals(result.pageResults.get("Archive Camera Validation")) ? "PASS" : "FAIL";
                 result.playbackStartupTimeMs = (System.nanoTime() - playbackStarted) / 1_000_000;
             }
             // Archive is the last validation; logout follows immediately. Settings, Users & Roles and
@@ -150,17 +169,50 @@ public final class SoakHealthCheckRunner {
                     result.error = appendError(result.error, "Logout control could not be used");
                     LOG.warn("[SOAK] Logout failed; closing the isolated browser context instead.");
                 }
+                // The session is over once logout returns, so the browser is shut down here instead
+                // of staying open while evidence and reports are written. Tracing has to stop first:
+                // stopping it needs a live context.
+                if (tracing) {
+                    try {
+                        Path trace = evidence.resolve("trace/trace.zip");
+                        context.tracing().stop(new Tracing.StopOptions().setPath(trace));
+                        result.trace = "trace/trace.zip";
+                    } catch (Exception exception) {
+                        LOG.warn("[SOAK] Trace could not be saved before closing the browser: {}",
+                                exception.getMessage());
+                    }
+                    tracing = false;
+                }
+                PlaywrightFactory.closeBrowser();
+                context = null;
+                page = null;
+                LOG.info("[SOAK] Browser closed after logout");
             }
+            LOG.info("[SOAK] All configured validations completed");
             if (result.pageResults.values().stream().anyMatch(value -> value.startsWith("FAIL"))) {
-                throw new IllegalStateException("One or more read-only page validations failed");
+                throw new SoakValidationFailedException("One or more read-only page validations failed");
             }
             if (!result.apiFailures.isEmpty()) {
-                throw new IllegalStateException("HTTP 500/502 responses detected: " + result.apiFailures.size());
+                throw new SoakValidationFailedException("HTTP 500/502 responses detected: " + result.apiFailures.size());
             }
             result.overall = "PASS";
         } catch (Exception exception) {
             result.error = exception.getMessage();
-            LOG.error("[SOAK] {} FAIL: {}", result.executionId, result.error);
+            if (exception instanceof SoakValidationFailedException) {
+                // Every validation, logout and browser-close above already ran to completion; this is
+                // the application being unhealthy, not the automation failing. executionStatus stays
+                // "COMPLETED" - only overall (already "FAIL" by default) carries this outcome.
+                LOG.warn("[SOAK] {} completed | Validation status=FAIL: {}", result.executionId, result.error);
+            } else {
+                // Anything else here is exactly what validatePage()/LiveViewMonitor could not isolate:
+                // a genuine infrastructure/framework problem (browser crash, Playwright init failure,
+                // an unexpected bug), not the application under test - reported distinctly so the two
+                // are never confused downstream.
+                result.executionStatus = "ERROR";
+                result.executionError = exception.getMessage();
+                LOG.error("[SOAK] {} EXECUTION ERROR (infrastructure/framework, not an application validation): {}",
+                        result.executionId, result.error, exception);
+            }
             try {
                 if (page != null && config.failureScreenshot()) {
                     Path screenshot = evidence.resolve("screenshots/failure.png");
@@ -175,17 +227,29 @@ public final class SoakHealthCheckRunner {
                 if (ApiMonitor.writeReportToQuietly(evidence) != null) {
                     result.apiFailureLog = "api-failures.log";
                 }
-                // Failure-centric soak reports under target/soak-test/run-<timestamp>/.
-                SoakReporter.writeAll(result.overall, iteration);
+                // Failure-centric soak reports under target/soak-test/run-<timestamp>/. The execution
+                // ID and full per-page results ride along so the consolidated report below can
+                // correlate and aggregate runs without re-deriving anything already computed here.
+                SoakReporter.writeAll(result.overall, iteration, result.executionId, result.pageResults);
                 if (tracing && context != null) {
                     Path trace = evidence.resolve("trace/trace.zip");
                     context.tracing().stop(new Tracing.StopOptions().setPath(trace));
                     result.trace = "trace/trace.zip";
                 }
                 JSON.writerWithDefaultPrettyPrinter().writeValue(evidence.resolve("result.json").toFile(), result);
+                LOG.info("[SOAK REPORT] Final report generated");
+            } catch (Exception ignored) { }
+            try {
+                // Additive reporting layer only: rescans every completed run under target/soak-test
+                // and rewrites the multi-run report. Never affects pass/fail or any flow above.
+                SoakConsolidatedReportGenerator.generate();
+                LOG.info("[SOAK REPORT] Consolidated report updated");
             } catch (Exception ignored) { }
             PlaywrightFactory.closeBrowser();
         }
+        LOG.info("[SOAK] Execution completed");
+        LOG.info("[SOAK] Validation status: {}", result.overall);
+        LOG.info("[SOAK] Execution status: {}", result.executionStatus);
         return result;
     }
 

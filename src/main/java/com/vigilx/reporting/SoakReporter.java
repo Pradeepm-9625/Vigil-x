@@ -219,13 +219,25 @@ public final class SoakReporter {
      * automation continues.
      */
     public static void writeAll(String overallResult, int iterations) {
+        writeAll(overallResult, iterations, null, null);
+    }
+
+    /**
+     * Same as {@link #writeAll(String, int)}, additionally stamping the run's unique execution ID and
+     * full per-page results (pass, fail, warn - every page, not just failures) into
+     * {@code soak-test-summary.json} so a consolidated multi-run report can correlate and aggregate
+     * runs without re-deriving anything this run already computed. Both are optional: passing
+     * {@code null} reproduces the exact output of the two-argument overload.
+     */
+    public static void writeAll(String overallResult, int iterations, String executionId,
+                                Map<String, String> pageResults) {
         SoakRunContext run = SoakRunContext.current();
         try {
             writePageFailures(run);
             writeStreamFailures(run);
             writeApiFailureJson(run);
             ApiMonitor.writeReportToQuietly(run.apiFailureDirectory());
-            writeFinalReports(run, overallResult, iterations);
+            writeFinalReports(run, overallResult, iterations, executionId, pageResults);
             System.out.println("[SOAK REPORT] Final report: "
                     + run.finalReportDirectory().resolve("soak-test-report.html").toAbsolutePath());
         } catch (Exception exception) {
@@ -329,7 +341,8 @@ public final class SoakReporter {
     // Final report
     // ---------------------------------------------------------------------
 
-    private static void writeFinalReports(SoakRunContext run, String overallResult, int iterations) {
+    private static void writeFinalReports(SoakRunContext run, String overallResult, int iterations,
+                                          String executionId, Map<String, String> pageStatuses) {
         List<ApiMonitor.ApiFailure> apiFailures = ApiMonitor.getFailures();
         List<ApiMonitor.PageApiResult> pageResults = ApiMonitor.getPageResults();
         List<PageFailure> pageFailures = new ArrayList<>(PAGE_FAILURES);
@@ -361,7 +374,8 @@ public final class SoakReporter {
                 apiFailures, streamFailures, timeline, totalResponses, successfulApis, totalFailedApis,
                 timeouts, statusDistribution);
 
-        writeJsonSummary(run, overallResult, iterations, start, end, duration, pageResults, pageFailures,
+        writeJsonSummary(run, overallResult, iterations, executionId, pageStatuses, start, end, duration,
+                pageResults, pageFailures,
                 apiFailures, streamFailures, totalResponses, successfulApis, totalFailedApis, timeouts,
                 statusDistribution);
     }
@@ -661,6 +675,7 @@ public final class SoakReporter {
     }
 
     private static void writeJsonSummary(SoakRunContext run, String overallResult, int iterations,
+                                         String executionId, Map<String, String> pageStatuses,
                                          LocalDateTime start, LocalDateTime end, String duration,
                                          List<ApiMonitor.PageApiResult> pageResults,
                                          List<PageFailure> pageFailures,
@@ -673,6 +688,13 @@ public final class SoakReporter {
             int pagesTested = Math.max(pageResults.size(), pagesFailed + PAGES_PASSED.get());
 
             Map<String, Object> summary = new LinkedHashMap<>();
+            // Additive fields, only present when the caller supplied them (writeAll(String, int) still
+            // produces the exact JSON this always produced): the run's unique ID and every page's own
+            // status (not just failures), so a consolidated multi-run report can be built by reading
+            // this file alone instead of re-deriving anything.
+            if (executionId != null) {
+                summary.put("executionId", executionId);
+            }
             summary.put("overallResult", overallResult);
             summary.put("startTime", start.format(TIMESTAMP));
             summary.put("endTime", end.format(TIMESTAMP));
@@ -689,6 +711,9 @@ public final class SoakReporter {
                 failedPageNames.add(failure.page());
             }
             pages.put("failedPages", failedPageNames);
+            if (pageStatuses != null && !pageStatuses.isEmpty()) {
+                pages.put("results", pageStatuses);
+            }
             summary.put("pages", pages);
 
             Map<String, Object> api = new LinkedHashMap<>();

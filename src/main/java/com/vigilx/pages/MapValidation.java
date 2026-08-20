@@ -276,7 +276,7 @@ public class MapValidation extends BasePage {
      * picked up without a code change.
      */
     private List<MapDevice> discoverDevices() {
-        revealDevices();
+        revealMapDevices(page);
 
         List<MapDevice> devices = new ArrayList<>();
         try {
@@ -309,16 +309,24 @@ public class MapValidation extends BasePage {
      * The live-preview buttons only exist once the side panel is opened and marker clusters are
      * expanded, which is what the recorded flow does by hand. Every click here is best-effort: the
      * map may already be in the required state.
+     *
+     * <p>Shared with {@link Map#validateMap(String)}: that check counted the buttons straight
+     * after the map painted and saw zero while every camera was still collapsed into a single
+     * "N Cameras" cluster pin.
+     *
+     * @return how many live-preview buttons are present once the map has been expanded
      */
-    private void revealDevices() {
-        if (openLiveButtonCount() > 0) {
-            return;
+    static int revealMapDevices(Page page) {
+        int count = openLiveButtonCount(page);
+        if (count > 0) {
+            return count;
         }
 
         // Open the side panel card that lists the sites/cameras.
         clickIfPresent(page.locator(".vxpanelcard__body").first());
-        if (openLiveButtonCount() > 0) {
-            return;
+        count = openLiveButtonCount(page);
+        if (count > 0) {
+            return count;
         }
 
         // Expand marker clusters ("2 Cameras", "3 Cameras", ...) until individual markers appear.
@@ -335,9 +343,10 @@ public class MapValidation extends BasePage {
                 if (clickIfPresent(clusters.nth(index))) {
                     clicked = true;
                     page.waitForTimeout(1000);
-                    if (openLiveButtonCount() > 0) {
+                    count = openLiveButtonCount(page);
+                    if (count > 0) {
                         System.out.println("[INFO] Device markers revealed after expanding map cluster(s).");
-                        return;
+                        return count;
                     }
                 }
             }
@@ -346,12 +355,11 @@ public class MapValidation extends BasePage {
             }
         }
 
-        if (openLiveButtonCount() == 0) {
-            System.out.println("[INFO] No live-preview buttons appeared after expanding the map.");
-        }
+        System.out.println("[INFO] No live-preview buttons appeared after expanding the map.");
+        return 0;
     }
 
-    private int openLiveButtonCount() {
+    private static int openLiveButtonCount(Page page) {
         try {
             return page.getByRole(AriaRole.BUTTON,
                     new Page.GetByRoleOptions().setName(Pattern.compile("open\\s+.+\\s+live", Pattern.CASE_INSENSITIVE)))
@@ -361,7 +369,7 @@ public class MapValidation extends BasePage {
         }
     }
 
-    private boolean clickIfPresent(Locator locator) {
+    private static boolean clickIfPresent(Locator locator) {
         try {
             if (locator.count() == 0 || !locator.isVisible()) {
                 return false;
