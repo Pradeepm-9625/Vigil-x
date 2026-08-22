@@ -49,6 +49,7 @@ public class MapValidation extends BasePage {
 
     private static final double PLAYBACK_TOLERANCE_SECONDS = 0.2;
     private static final int PLAYBACK_SAMPLE_MS = 3000;
+    private static final int CAMERA_SELECTED_WAIT_MS = 10000;
 
     private final Path screenshotDirectory;
 
@@ -504,7 +505,10 @@ public class MapValidation extends BasePage {
             }
 
             video.evaluate("element => { element.muted = true; element.volume = 0; element.play(); }");
-            page.waitForTimeout(1500);
+
+            // Camera selected - give the live stream 10s to establish itself before judging
+            // whether it is available, rather than the previous much shorter 1.5s settle time.
+            page.waitForTimeout(CAMERA_SELECTED_WAIT_MS);
 
             result.readyState = ((Number) video.evaluate("element => element.readyState")).intValue();
             int width = ((Number) video.evaluate("element => element.videoWidth")).intValue();

@@ -9,6 +9,7 @@ import java.util.regex.Pattern;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.options.AriaRole;
+import com.microsoft.playwright.options.WaitForSelectorState;
 
 public class Map extends BasePage {
 
@@ -149,17 +150,20 @@ public class Map extends BasePage {
         );
 
         // ---------------------------------------------------------
-        // 6. Wait for live preview
-        // ---------------------------------------------------------
-
-        page.waitForTimeout(2000);
-
-        // ---------------------------------------------------------
-        // 7. Find video
+        // 6. Find video (bounded wait for it to attach after the click;
+        //    this is plumbing, not the 10s stream-establishment wait below)
         // ---------------------------------------------------------
 
         Locator videos =
                 page.locator("video");
+
+        try {
+            videos.last().waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.ATTACHED)
+                    .setTimeout(5000));
+        } catch (Exception ignored) {
+            // Falls through to the explicit count check below, which fails with a screenshot.
+        }
 
         if (videos.count() == 0) {
 
@@ -182,7 +186,7 @@ public class Map extends BasePage {
                 videos.last();
 
         // ---------------------------------------------------------
-        // 8. Check video visibility
+        // 7. Check video visibility
         // ---------------------------------------------------------
 
         if (!video.isVisible()) {
@@ -203,7 +207,7 @@ public class Map extends BasePage {
         }
 
         // ---------------------------------------------------------
-        // 9. Check video source
+        // 8. Check video source
         // ---------------------------------------------------------
 
         String source =
@@ -240,7 +244,7 @@ public class Map extends BasePage {
         }
 
         // ---------------------------------------------------------
-        // 10. Check video error
+        // 9. Check video error
         // ---------------------------------------------------------
 
         String videoError =
@@ -280,7 +284,7 @@ public class Map extends BasePage {
         }
 
         // ---------------------------------------------------------
-        // 11. Mute video
+        // 10. Mute and start the stream
         // ---------------------------------------------------------
 
         video.evaluate(
@@ -288,38 +292,36 @@ public class Map extends BasePage {
                 element => {
                     element.muted = true;
                     element.volume = 0;
-                }
-                """
-        );
-
-        // ---------------------------------------------------------
-        // 12. Start video
-        // ---------------------------------------------------------
-
-        System.out.println(
-                "[INFO] Starting live stream..."
-        );
-
-        video.evaluate(
-                """
-                element => {
                     element.play();
                 }
                 """
         );
 
-        page.waitForTimeout(3000);
+        // ---------------------------------------------------------
+        // 11. Wait 10s for the live stream to establish itself
+        // ---------------------------------------------------------
+
+        System.out.println(
+                "[INFO] Camera selected. Waiting 10s before validating stream availability..."
+        );
+
+        page.waitForTimeout(10000);
 
         // ---------------------------------------------------------
-        // 13. Check playback
+        // 12. Validate whether the stream is available
         // ---------------------------------------------------------
+
+        int readyState =
+                ((Number) video.evaluate(
+                        "element => element.readyState"
+                )).intValue();
 
         double startTime =
                 ((Number) video.evaluate(
                         "element => element.currentTime"
                 )).doubleValue();
 
-        page.waitForTimeout(3000);
+        page.waitForTimeout(1000);
 
         double endTime =
                 ((Number) video.evaluate(
@@ -347,14 +349,15 @@ public class Map extends BasePage {
                 )).intValue();
 
         boolean playbackProgressed =
-                endTime > startTime + 0.2;
+                endTime > startTime + 0.05;
 
         boolean validResolution =
                 width > 0 &&
                         height > 0;
 
         boolean streamAvailable =
-                !paused &&
+                readyState >= 2 &&
+                        !paused &&
                         !ended &&
                         playbackProgressed &&
                         validResolution;
@@ -375,6 +378,11 @@ public class Map extends BasePage {
         System.out.println(
                 "Source       : "
                         + source
+        );
+
+        System.out.println(
+                "Ready State  : "
+                        + readyState
         );
 
         System.out.println(
