@@ -112,7 +112,7 @@ public final class SoakHealthCheckRunner {
                     }
                 }
             }
-            validatePage(page, result, "Settings", healthPages::validateSettings);
+            validatePage(page, result, "License", healthPages::validateSettings);
             validatePage(page, result, "Users & Roles", healthPages::validateUsersAndRoles);
             validatePage(page, result, "Organisation", healthPages::validateOrganisation);
             if (config.liveEnabled()) {

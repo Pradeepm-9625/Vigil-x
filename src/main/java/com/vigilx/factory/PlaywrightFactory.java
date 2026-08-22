@@ -60,6 +60,16 @@ public final class PlaywrightFactory {
 
                 break;
 
+            case "chrome":
+
+                browser = playwright.chromium().launch(
+                        new BrowserType.LaunchOptions()
+                                .setChannel("chrome")
+                                .setHeadless(headless)
+                                .setSlowMo((double) slowMo));
+
+                break;
+
             case "chromium":
 
             default:

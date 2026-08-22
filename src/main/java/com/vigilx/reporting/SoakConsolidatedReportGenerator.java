@@ -115,15 +115,26 @@ public final class SoakConsolidatedReportGenerator {
         }
     }
 
-    /** One page/module's pass rate across every run that reported it. */
+    /**
+     * One page/module's pass rate across every run that reported it.
+     *
+     * <p>A page's per-run status is one of three shapes (see {@code SoakHealthCheckRunner}): the exact
+     * string {@code "PASS"}, a {@code "WARN: ..."} for a soft/non-required check that was allowed to
+     * fail without failing the run (e.g. {@code soak.alert.required=false}), or a {@code "FAIL..."} for
+     * a real, run-failing validation. Lumping {@code WARN} in with {@code FAIL} used to make a page's
+     * pass rate 0% purely from soft warnings with zero actual failures, so the two are tracked
+     * separately here.
+     */
     private static final class PageStat {
         String page;
         int total;
         int passed;
+        int warned;
         int failed;
 
+        /** Pass rate counting warnings as non-failing, since they never failed the run either. */
         double passRate() {
-            return total == 0 ? 0.0 : (100.0 * passed / total);
+            return total == 0 ? 0.0 : (100.0 * (passed + warned) / total);
         }
     }
 
@@ -137,8 +148,11 @@ public final class SoakConsolidatedReportGenerator {
                     return created;
                 });
                 stat.total++;
-                if ("PASS".equalsIgnoreCase(entry.getValue())) {
+                String status = entry.getValue() == null ? "" : entry.getValue().trim();
+                if ("PASS".equalsIgnoreCase(status)) {
                     stat.passed++;
+                } else if (status.regionMatches(true, 0, "WARN", 0, 4)) {
+                    stat.warned++;
                 } else {
                     stat.failed++;
                 }
@@ -237,6 +251,7 @@ public final class SoakConsolidatedReportGenerator {
             row.put("page", stat.page);
             row.put("totalRuns", stat.total);
             row.put("passed", stat.passed);
+            row.put("warned", stat.warned);
             row.put("failed", stat.failed);
             row.put("passRate", round(stat.passRate()));
             pageRows.add(row);
@@ -349,7 +364,7 @@ public final class SoakConsolidatedReportGenerator {
                 .append("text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}")
                 .append("tr:last-child td{border-bottom:none}code{font:12px ui-monospace,Menlo,Consolas,monospace;")
                 .append("word-break:break-all}.tw{overflow-x:auto}")
-                .append(".s{font-weight:700}.s.e{color:var(--fail)}.s.p{color:var(--pass)}")
+                .append(".s{font-weight:700}.s.e{color:var(--fail)}.s.p{color:var(--pass)}.s.w{color:var(--warn)}")
                 .append("a{color:inherit}.badge{display:inline-block;padding:2px 8px;border-radius:4px;")
                 .append("font-weight:700;font-size:12px;color:#fff}.badge.pass{background:var(--pass)}")
                 .append(".badge.fail{background:var(--fail)}.badge.na{background:var(--muted)}")
@@ -403,12 +418,17 @@ public final class SoakConsolidatedReportGenerator {
         }
 
         if (!pageStats.isEmpty()) {
-            html.append("<h2>Page-level summary</h2><div class=\"tw\"><table>")
-                    .append("<tr><th>Page / module</th><th>Total runs</th><th>Passed</th><th>Failed</th>")
-                    .append("<th>Pass rate</th></tr>");
+            html.append("<h2>Page-level summary</h2>")
+                    .append("<p class=\"sub\">Warned = a soft, non-required check ")
+                    .append("(e.g. <code>soak.alert.required=false</code>) that did not fail the run; ")
+                    .append("only Failed reflects a genuine, run-failing validation.</p>")
+                    .append("<div class=\"tw\"><table>")
+                    .append("<tr><th>Page / module</th><th>Total runs</th><th>Passed</th><th>Warned</th>")
+                    .append("<th>Failed</th><th>Pass rate</th></tr>");
             for (PageStat stat : pageStats) {
                 html.append("<tr><td>").append(escape(stat.page)).append("</td><td>").append(stat.total)
-                        .append("</td><td class=\"s p\">").append(stat.passed).append("</td><td class=\"s e\">")
+                        .append("</td><td class=\"s p\">").append(stat.passed).append("</td><td class=\"s w\">")
+                        .append(stat.warned).append("</td><td class=\"s e\">")
                         .append(stat.failed).append("</td><td>").append(formatPercent(stat.passRate()))
                         .append("</td></tr>");
             }

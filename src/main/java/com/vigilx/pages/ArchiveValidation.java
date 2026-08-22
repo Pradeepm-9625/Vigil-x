@@ -38,11 +38,20 @@ public class ArchiveValidation extends BasePage {
     private static final double PLAYBACK_TOLERANCE_SECONDS = 0.2;
 
     /** How long the recording must keep progressing for; overridable via archive.playback.monitor.seconds. */
-    private static final int DEFAULT_MONITOR_SECONDS = 30;
+    private static final int DEFAULT_MONITOR_SECONDS = 60;
     /** Poll cadence during that window; overridable via archive.playback.monitor.interval.ms. */
     private static final int DEFAULT_MONITOR_INTERVAL_MS = 2000;
     /** Consecutive non-progressing samples tolerated before the stream counts as stalled. */
     private static final int DEFAULT_MONITOR_STALL_SAMPLES = 3;
+    /**
+     * How long a just-added stream is given to hand back its first decodable frame before it is
+     * declared failed; overridable via archive.playback.startup.timeout.seconds. A freshly added
+     * camera can take a while (manifest fetch, decoder init) even when perfectly healthy, so this
+     * polls instead of taking one early snapshot and failing on it.
+     */
+    private static final int DEFAULT_STARTUP_TIMEOUT_SECONDS = 60;
+    /** Poll cadence while waiting for the stream to start. */
+    private static final long STARTUP_POLL_INTERVAL_MS = 1000L;
 
     /** Markers that mean "this device is usable"; overridable via archive.online.pattern. */
     private static final String DEFAULT_ONLINE_PATTERN =
@@ -762,30 +771,46 @@ public class ArchiveValidation extends BasePage {
         return false;
     }
 
-    /** Confirms the camera reached the playback area, by name where possible. */
+    /**
+     * Confirms the camera reached the playback area, by name where possible. Polls for up to
+     * {@code archive.playback.startup.timeout.seconds} (default 60s) instead of checking once
+     * immediately after Save: the tile can take a moment to mount and its backing API call to
+     * resolve, and a single early check reads that gap as "not added" even though it lands a
+     * second later - confirmed live, where the tile and a "Recording loaded" toast both appeared
+     * just after this check had already failed.
+     */
     private boolean validateCameraAdded(String deviceName) {
-        try {
-            String shortName = deviceName.length() > 40 ? deviceName.substring(0, 40) : deviceName;
-            Locator byName = page.getByText(shortName, new Page.GetByTextOptions().setExact(false)).first();
-            if (byName.count() > 0 && byName.isVisible()) {
-                System.out.println("[PASS] Camera is present in the playback area: " + shortName);
-                return true;
+        long timeoutMs = Math.max(1, intConfig("archive.playback.startup.timeout.seconds",
+                DEFAULT_STARTUP_TIMEOUT_SECONDS)) * 1000L;
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        String shortName = deviceName.length() > 40 ? deviceName.substring(0, 40) : deviceName;
+
+        while (true) {
+            try {
+                Locator byName = page.getByText(shortName, new Page.GetByTextOptions().setExact(false)).first();
+                if (byName.count() > 0 && byName.isVisible()) {
+                    System.out.println("[PASS] Camera is present in the playback area: " + shortName);
+                    return true;
+                }
+
+                // Some builds render the tile without a text label; a media element is equally valid.
+                Locator media = page.locator("video, canvas, [class*='player' i]").first();
+                if (media.count() > 0 && media.isVisible()) {
+                    System.out.println("[PASS] Playback tile rendered for the added camera.");
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // Transient DOM read while the tile is still mounting; keep polling.
             }
 
-            // Some builds render the tile without a text label; a media element is equally valid.
-            Locator media = page.locator("video, canvas, [class*='player' i]").first();
-            if (media.count() > 0 && media.isVisible()) {
-                System.out.println("[PASS] Playback tile rendered for the added camera.");
-                return true;
+            if (System.currentTimeMillis() >= deadline) {
+                break;
             }
-
-            System.err.println("[FAIL] Camera did not appear in the playback area.");
-            return false;
-
-        } catch (Exception exception) {
-            System.err.println("[FAIL] Could not confirm the camera was added: " + exception.getMessage());
-            return false;
+            page.waitForTimeout(STARTUP_POLL_INTERVAL_MS);
         }
+
+        System.err.println("[FAIL] Camera did not appear in the playback area within " + (timeoutMs / 1000) + "s.");
+        return false;
     }
 
     // ---------------------------------------------------------------------
@@ -823,25 +848,9 @@ public class ArchiveValidation extends BasePage {
             }
 
             video.evaluate("element => { element.muted = true; element.volume = 0; element.play(); }");
-            page.waitForTimeout(1500);
 
-            report.readyState = ((Number) video.evaluate("element => element.readyState")).intValue();
-            int width = ((Number) video.evaluate("element => element.videoWidth")).intValue();
-            int height = ((Number) video.evaluate("element => element.videoHeight")).intValue();
-            report.resolution = width + "x" + height;
-
-            if (report.readyState < 2) {
-                report.readyStateStatus = "FAIL";
-                fail(report, "readyState insufficient (" + report.readyState + ")",
-                        slug(deviceName) + "-readystate-failed");
-                return;
-            }
-            report.readyStateStatus = "PASS";
-
-            if (width <= 0 || height <= 0) {
-                fail(report, "Recording resolution is zero - placeholder shown instead of playback",
-                        slug(deviceName) + "-zero-resolution");
-                return;
+            if (!waitForStreamToStart(video, report, deviceName)) {
+                return; // waitForStreamToStart() already recorded the failure.
             }
 
             monitorPlayback(video, report, deviceName);
@@ -850,6 +859,68 @@ public class ArchiveValidation extends BasePage {
             fail(report, "Playback validation error: " + exception.getMessage(),
                     slug(deviceName) + "-playback-exception");
         }
+    }
+
+    /**
+     * Polls the newly added stream for up to {@code archive.playback.startup.timeout.seconds}
+     * (default 60s) until it actually has a decodable frame - {@code readyState >= 2} and a
+     * non-zero resolution - instead of taking one snapshot shortly after {@code play()} and
+     * failing on it. A stream is only declared failed once nothing has arrived by the deadline.
+     *
+     * @return {@code true} once the stream has started; {@code false} after recording a failure
+     *         (element lost, a media error surfaced, or the deadline was reached with nothing)
+     */
+    private boolean waitForStreamToStart(Locator video, ArchiveReport report, String deviceName) {
+        long timeoutMs = Math.max(1, intConfig("archive.playback.startup.timeout.seconds",
+                DEFAULT_STARTUP_TIMEOUT_SECONDS)) * 1000L;
+        long deadline = System.currentTimeMillis() + timeoutMs;
+
+        int readyState = 0;
+        int width = 0;
+        int height = 0;
+
+        System.out.println("[INFO] Waiting up to " + (timeoutMs / 1000)
+                + "s for the newly added stream to start - device: " + deviceName);
+
+        while (true) {
+            if (video.count() == 0 || !video.isVisible()) {
+                fail(report, "Playback video element disappeared while waiting for the stream to start",
+                        slug(deviceName) + "-video-lost-startup");
+                return false;
+            }
+
+            String mediaError = String.valueOf(video.evaluate(
+                    "element => element.error ? JSON.stringify({code: element.error.code, message: element.error.message}) : ''"));
+            if (mediaError != null && !mediaError.isBlank() && !"null".equals(mediaError)) {
+                fail(report, "Media error while waiting for the stream to start: " + mediaError,
+                        slug(deviceName) + "-startup-media-error");
+                return false;
+            }
+
+            readyState = ((Number) video.evaluate("element => element.readyState")).intValue();
+            width = ((Number) video.evaluate("element => element.videoWidth")).intValue();
+            height = ((Number) video.evaluate("element => element.videoHeight")).intValue();
+            report.readyState = readyState;
+            report.resolution = width + "x" + height;
+
+            if (readyState >= 2 && width > 0 && height > 0) {
+                report.readyStateStatus = "PASS";
+                System.out.println("[PASS] Stream started - readyState=" + readyState
+                        + " resolution=" + report.resolution);
+                return true;
+            }
+
+            if (System.currentTimeMillis() >= deadline) {
+                break;
+            }
+
+            page.waitForTimeout(STARTUP_POLL_INTERVAL_MS);
+        }
+
+        report.readyStateStatus = "FAIL";
+        fail(report, "Stream did not start within " + (timeoutMs / 1000) + "s (readyState=" + readyState
+                + ", resolution=" + width + "x" + height + ")", slug(deviceName) + "-startup-timeout");
+        return false;
     }
 
     /**
