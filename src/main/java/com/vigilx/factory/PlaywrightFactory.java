@@ -117,6 +117,9 @@ public final class PlaywrightFactory {
 
         // Written before teardown so the consolidated report survives a failing close().
         ApiMonitor.writeReportQuietly();
+        // No-op unless api.inventory.enabled=true (off by default); same "survive a failing
+        // close()" reasoning as the failure report above, for the separate opt-in API inventory.
+        ApiMonitor.writeInventoryReportQuietly();
 
         // Idempotent: the soak run closes the browser as soon as logout ends, and its finally
         // block calls this again. Every handle is dropped so the second call is a no-op.

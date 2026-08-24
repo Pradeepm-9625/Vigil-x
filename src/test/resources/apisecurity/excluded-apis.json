@@ -1,0 +1,9 @@
+{
+  "_readme": [
+    "GET endpoints that must never be auto-executed even though the default policy would otherwise",
+    "allow them - e.g. a GET later discovered to carry a real side effect. Empty by default: no GET",
+    "endpoint has been found to need this yet. Shape: { \"method\": \"GET\", \"host\": \"192.168.1.145:3000\",",
+    "\"path\": \"/some/endpoint\", \"reason\": \"why this must never be auto-executed\" }"
+  ],
+  "excluded": []
+}

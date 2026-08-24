@@ -1,6 +1,7 @@
 package com.vigilx.monitoring;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,11 +22,13 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Request;
 import com.microsoft.playwright.Response;
 import com.vigilx.config.ConfigReader;
+import com.vigilx.utils.SecretMasker;
 
 /**
  * Passive, reusable observability layer for API/XHR traffic.
@@ -87,6 +90,17 @@ public final class ApiMonitor {
     private static final int MAX_BODY_CHARACTERS = 2000;
     private static final int MAX_STORED_FAILURES = 5000;
 
+    /**
+     * Full per-call API inventory - separate from the failure log above, and off by default.
+     * Existing SOAK behavior, output, and the failure log are completely unaffected by this
+     * feature whether it is enabled or not; see {@code api.inventory.enabled}.
+     */
+    private static final String DEFAULT_INVENTORY_OUTPUT_DIRECTORY = "target/apisecurity/api-inventory";
+    private static final String INVENTORY_FILE_NAME = "api-inventory.json";
+    private static final int MAX_INVENTORY_ENTRIES = 5000;
+    private static final int MAX_INVENTORY_BODY_CHARACTERS = 2000;
+    private static final ObjectMapper INVENTORY_JSON = new ObjectMapper();
+
     /** A request in flight longer than this is treated as streaming and stops gating the page. */
     private static final long STREAMING_THRESHOLD_MS = 20000;
 
@@ -113,6 +127,19 @@ public final class ApiMonitor {
 
     /** Completed page validations, for the closing summary. */
     private static final ConcurrentLinkedQueue<PageApiResult> PAGE_RESULTS = new ConcurrentLinkedQueue<>();
+
+    /**
+     * Insertion-ordered API inventory - every call, success or failure - recorded only when
+     * {@code api.inventory.enabled=true}. Feeds the separate API security/performance automation;
+     * the existing failure log (FAILURES above) is built independently of this and unaffected.
+     */
+    private static final ConcurrentLinkedQueue<ApiInventoryEntry> INVENTORY = new ConcurrentLinkedQueue<>();
+
+    /** Dedup index over the inventory, keyed by exact method+host+path+query (not path-templated). */
+    private static final ConcurrentHashMap<String, ApiInventoryEntry> INVENTORY_BY_KEY = new ConcurrentHashMap<>();
+
+    /** Distinct inventory entries dropped once MAX_INVENTORY_ENTRIES was reached. */
+    private static final AtomicInteger INVENTORY_DROPPED = new AtomicInteger();
 
     /** Pages/contexts already carrying listeners, so a re-attach cannot double-count. */
     private static final Set<Page> ATTACHED_PAGES =
@@ -248,6 +275,95 @@ public final class ApiMonitor {
         }
     }
 
+    /**
+     * One captured API call - success or failure alike - recorded only when the opt-in
+     * {@code api.inventory.enabled} flag is on. Headers and bodies are always masked via
+     * {@link SecretMasker} before they reach this class.
+     */
+    public static final class ApiInventoryEntry {
+        private final String timestamp;
+        private final String method;
+        private final String host;
+        private final String path;
+        private final String query;
+        private final int status;
+        private final Long responseTimeMs;
+        private final String contentType;
+        private final Map<String, String> requestHeaders;
+        private final Map<String, String> responseHeaders;
+        private final String requestBody;
+        private final String responseBody;
+        private final String resourceType;
+        private final String pageName;
+        private final String operation;
+        private final int iteration;
+        private final AtomicInteger occurrences = new AtomicInteger(1);
+
+        private ApiInventoryEntry(String timestamp, String method, String host, String path, String query,
+                                  int status, Long responseTimeMs, String contentType,
+                                  Map<String, String> requestHeaders, Map<String, String> responseHeaders,
+                                  String requestBody, String responseBody, String resourceType,
+                                  String pageName, String operation, int iteration) {
+            this.timestamp = timestamp;
+            this.method = method;
+            this.host = host;
+            this.path = path;
+            this.query = query;
+            this.status = status;
+            this.responseTimeMs = responseTimeMs;
+            this.contentType = contentType;
+            this.requestHeaders = requestHeaders;
+            this.responseHeaders = responseHeaders;
+            this.requestBody = requestBody;
+            this.responseBody = responseBody;
+            this.resourceType = resourceType;
+            this.pageName = pageName;
+            this.operation = operation;
+            this.iteration = iteration;
+        }
+
+        public String timestamp() { return timestamp; }
+        public String method() { return method; }
+        public String host() { return host; }
+        public String path() { return path; }
+        public String query() { return query; }
+        public int status() { return status; }
+        public Long responseTimeMs() { return responseTimeMs; }
+        public String contentType() { return contentType; }
+        public Map<String, String> requestHeaders() { return requestHeaders; }
+        public Map<String, String> responseHeaders() { return responseHeaders; }
+        public String requestBody() { return requestBody; }
+        public String responseBody() { return responseBody; }
+        public String resourceType() { return resourceType; }
+        public String pageName() { return pageName; }
+        public String operation() { return operation; }
+        public int iteration() { return iteration; }
+        public int occurrences() { return occurrences.get(); }
+
+        /** Plain-map shape for JSON output; avoids relying on Jackson bean-introspection of this class. */
+        public Map<String, Object> toJsonMap() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("timestamp", timestamp);
+            map.put("method", method);
+            map.put("host", host);
+            map.put("path", path);
+            map.put("query", query == null ? "" : query);
+            map.put("statusCode", status);
+            map.put("responseTimeMs", responseTimeMs);
+            map.put("contentType", contentType == null ? "" : contentType);
+            map.put("requestHeaders", requestHeaders);
+            map.put("responseHeaders", responseHeaders);
+            map.put("requestBody", requestBody == null ? "" : requestBody);
+            map.put("responseBody", responseBody == null ? "" : responseBody);
+            map.put("resourceType", resourceType);
+            map.put("pageName", pageName);
+            map.put("operation", operation);
+            map.put("iteration", iteration);
+            map.put("occurrences", occurrences());
+            return map;
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Registration
     // ---------------------------------------------------------------------
@@ -295,7 +411,12 @@ public final class ApiMonitor {
             return;
         }
         try {
-            Runtime.getRuntime().addShutdownHook(new Thread(ApiMonitor::writeReportQuietly, "api-monitor-report"));
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                writeReportQuietly();
+                // No-op unless api.inventory.enabled=true; the existing failure report above is
+                // written first and is completely unaffected either way.
+                writeInventoryReportQuietly();
+            }, "api-monitor-report"));
         } catch (Exception ignored) {
             // A JVM already shutting down rejects new hooks; teardown still covers the normal path.
         }
@@ -383,7 +504,7 @@ public final class ApiMonitor {
     private static void record(Response response) {
         try {
             Request request = response.request();
-            IN_FLIGHT.remove(request);
+            Long startedNanos = IN_FLIGHT.remove(request);
 
             int status = response.status();
             String url = response.url();
@@ -396,16 +517,101 @@ public final class ApiMonitor {
             STATUS_COUNTS.computeIfAbsent(status, key -> new AtomicInteger()).incrementAndGet();
 
             if (EXPECTED_STATUSES.contains(status)) {
+                // The full inventory (opt-in, off by default) wants every call, not just failures;
+                // the failure log below only ever sees non-2xx/204 responses, exactly as before.
+                recordInventoryIfEnabled(request, response, status, resourceType, startedNanos, null);
                 return;
             }
 
             // The body is read only for responses already known to be failures, keeping this off the
             // hot path for the thousands of successful calls a soak makes.
-            store(safeMethod(request), status, safeStatusText(response), url, resourceType,
-                    readBodySafely(response), null);
+            String body = readBodySafely(response);
+            store(safeMethod(request), status, safeStatusText(response), url, resourceType, body, null);
+            recordInventoryIfEnabled(request, response, status, resourceType, startedNanos, body);
 
         } catch (Exception exception) {
             System.err.println("[API MONITOR] Skipped a response: " + exception.getMessage());
+        }
+    }
+
+    /**
+     * Adds one call to the full API inventory when {@code api.inventory.enabled=true}; a no-op
+     * otherwise. Completely separate from - and never influences - the failure log above.
+     *
+     * @param bodyAlreadyRead the response body if the caller already read it (failures), otherwise
+     *                        {@code null} so this method reads it itself, only when enabled
+     */
+    private static void recordInventoryIfEnabled(Request request, Response response, int status,
+                                                  String resourceType, Long startedNanos, String bodyAlreadyRead) {
+        if (!isInventoryEnabled()) {
+            return;
+        }
+        try {
+            String method = safeMethod(request);
+            URI uri = URI.create(response.url());
+            String host = uri.getHost() == null ? "" : uri.getHost() + (uri.getPort() > 0 ? ":" + uri.getPort() : "");
+            String path = uri.getPath() == null || uri.getPath().isBlank() ? "/" : uri.getPath();
+            String query = uri.getQuery();
+
+            String key = method + " " + host + path + "?" + (query == null ? "" : query);
+            ApiInventoryEntry existing = INVENTORY_BY_KEY.get(key);
+            if (existing != null) {
+                existing.occurrences.incrementAndGet();
+                return;
+            }
+            if (INVENTORY_BY_KEY.size() >= maxInventoryEntries()) {
+                INVENTORY_DROPPED.incrementAndGet();
+                return;
+            }
+
+            Long responseTimeMs = startedNanos == null ? null : (System.nanoTime() - startedNanos) / 1_000_000;
+            String body = bodyAlreadyRead != null ? bodyAlreadyRead : readBodySafely(response);
+            Map<String, String> responseHeaders = safeResponseHeaders(response);
+
+            ApiInventoryEntry entry = new ApiInventoryEntry(
+                    LocalDateTime.now().format(TIMESTAMP), method, host, path, query, status, responseTimeMs,
+                    responseHeaders.getOrDefault("content-type", ""),
+                    SecretMasker.maskHeaders(safeRequestHeaders(request)),
+                    SecretMasker.maskHeaders(responseHeaders),
+                    SecretMasker.maskBody(safeRequestBody(request), MAX_INVENTORY_BODY_CHARACTERS),
+                    SecretMasker.maskBody(body, MAX_INVENTORY_BODY_CHARACTERS),
+                    resourceType, currentPage, currentOperation, currentIteration);
+
+            ApiInventoryEntry raced = INVENTORY_BY_KEY.putIfAbsent(key, entry);
+            if (raced == null) {
+                INVENTORY.add(entry);
+            } else {
+                raced.occurrences.incrementAndGet();
+            }
+        } catch (Exception exception) {
+            System.err.println("[API MONITOR] Skipped an inventory entry: " + exception.getMessage());
+        }
+    }
+
+    private static Map<String, String> safeRequestHeaders(Request request) {
+        try {
+            Map<String, String> headers = request.headers();
+            return headers == null ? Map.of() : headers;
+        } catch (Exception exception) {
+            return Map.of();
+        }
+    }
+
+    private static Map<String, String> safeResponseHeaders(Response response) {
+        try {
+            Map<String, String> headers = response.headers();
+            return headers == null ? Map.of() : headers;
+        } catch (Exception exception) {
+            return Map.of();
+        }
+    }
+
+    private static String safeRequestBody(Request request) {
+        try {
+            String data = request.postData();
+            return data == null ? "" : data;
+        } catch (Exception exception) {
+            return "";
         }
     }
 
@@ -855,6 +1061,78 @@ public final class ApiMonitor {
     }
 
     // ---------------------------------------------------------------------
+    // API inventory (opt-in, separate from the failure report above)
+    // ---------------------------------------------------------------------
+
+    /** Snapshot of the distinct API inventory entries captured so far, in first-seen order. */
+    public static List<ApiInventoryEntry> getInventory() {
+        return new ArrayList<>(INVENTORY);
+    }
+
+    /** Number of distinct calls recorded in the inventory (0 whenever the feature is disabled). */
+    public static int getInventoryCount() {
+        return INVENTORY.size();
+    }
+
+    /** Destination of the API inventory JSON file. */
+    public static Path getInventoryLogFile() {
+        String directory = ConfigReader.getOrDefault(
+                "api.inventory.output.directory", DEFAULT_INVENTORY_OUTPUT_DIRECTORY);
+        if (directory.isBlank()) {
+            directory = DEFAULT_INVENTORY_OUTPUT_DIRECTORY;
+        }
+        return Paths.get(directory, INVENTORY_FILE_NAME).toAbsolutePath();
+    }
+
+    /**
+     * Writes the API inventory to its JSON file. A no-op returning {@code null} whenever
+     * {@code api.inventory.enabled} is not {@code true} - the default - so nothing changes for
+     * anyone who has not opted in.
+     */
+    public static Path writeInventoryReport() throws IOException {
+        if (!isInventoryEnabled()) {
+            return null;
+        }
+        Path file = getInventoryLogFile();
+        Files.createDirectories(file.getParent());
+        List<Map<String, Object>> entries = new ArrayList<>();
+        for (ApiInventoryEntry entry : getInventory()) {
+            entries.add(entry.toJsonMap());
+        }
+        INVENTORY_JSON.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), entries);
+        System.out.println("[API MONITOR] " + entries.size() + " distinct API inventory entr"
+                + (entries.size() == 1 ? "y" : "ies") + " written to " + file);
+        return file;
+    }
+
+    /** Writes the API inventory, swallowing any error. Intended for teardown paths. */
+    public static void writeInventoryReportQuietly() {
+        try {
+            writeInventoryReport();
+        } catch (Exception exception) {
+            System.err.println("[API MONITOR] Could not write the API inventory report: " + exception.getMessage());
+        }
+    }
+
+    /** Off by default: the API inventory only ever grows when this is explicitly turned on. */
+    private static boolean isInventoryEnabled() {
+        try {
+            return Boolean.parseBoolean(ConfigReader.getOrDefault("api.inventory.enabled", "false"));
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    private static int maxInventoryEntries() {
+        try {
+            String value = ConfigReader.getOrDefault("api.inventory.max.entries", String.valueOf(MAX_INVENTORY_ENTRIES));
+            return value.isBlank() ? MAX_INVENTORY_ENTRIES : Integer.parseInt(value.trim());
+        } catch (Exception exception) {
+            return MAX_INVENTORY_ENTRIES;
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Accessors
     // ---------------------------------------------------------------------
 
@@ -887,6 +1165,9 @@ public final class ApiMonitor {
         TOTAL_RESPONSES.set(0);
         TIMEOUTS.set(0);
         PAGE_RESULTS.clear();
+        INVENTORY.clear();
+        INVENTORY_BY_KEY.clear();
+        INVENTORY_DROPPED.set(0);
     }
 
     /** Destination of the consolidated report. */
