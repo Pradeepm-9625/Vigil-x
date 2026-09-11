@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+
+<suite name="VigilX Automation Suite">
+
+    <listeners>
+        <listener class-name="com.vigilx.listeners.TestListener"/>
+    </listeners>
+
+    <test name="Smoke Test">
+
+        <classes>
+
+            <class name="com.vigilx.tests.ConfigTest"/>
+
+            <class name="com.vigilx.tests.login.LoginTest"/>
+
+        </classes>
+
+    </test>
+
+</suite>

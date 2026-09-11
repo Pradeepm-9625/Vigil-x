@@ -1,0 +1,751 @@
+{
+  "_readme" : [ "Only add an entry here after ApiComparisonService has confirmed - against a real ApiMonitor", "inventory capture, not just by eyeballing a HAR - that the API is genuinely missing from", "ApiMonitor's capture. Never add APIs from a HAR speculatively; never add an API that", "ApiMonitor already captures. Each entry becomes one ApiDefinition with source=MANUAL.", "\"path\" MUST be a real, concrete, callable sample path (from samplePath) - never a", "normalizedPath template containing a literal {id}/{streamSessionId} placeholder.", "\"authObservedInSample\": always null for HAR-sourced entries - this HAR was exported by", "Chrome DevTools, which redacts Authorization/Cookie headers on export (confirmed: 0 of 3890", "entries carry either), so absence there is an export artifact, never asserted as real evidence.", "Populated on 2026-08-22 from target/apisecurity/reports/api-inventory-comparison.json", "(soak run-20260822-162220 vs OWSAP automation-Final.har): 85 entries, all confirmed missing." ],
+  "apis" : [ {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/nodes",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/onboarding/nodes",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/project-hierarchy/5eb81e37-2922-45ae-9450-a92e0610dc59",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/onboarding/project-hierarchy/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/tags",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/tags",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/sites",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/onboarding/sites",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/f9529ee9-3f28-4d3b-9e83-2916c54ef14f/decommission",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/devices/{id}/decommission",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/check-availability",
+    "query" : "ipAddress=183.82.251.239&port=3009",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/check-availability",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/streaming/get-temp-live-url",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/streaming/get-temp-live-url",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/master-configurations",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/tags",
+    "query" : "page=1&limit=20",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/tags",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/12d049e2-d927-484d-9650-e89ed4804c74",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/master-configurations/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/devices",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/site",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/site",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/quality-check",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/quality-check",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/quality-check",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/quality-check",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/details",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/details",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/cameras/profile/encoder-options",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/cameras/profile/encoder-options",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/cameras/profile/set-encoder-config",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/cameras/profile/set-encoder-config",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/stream-settings",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/stream-settings",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/recording",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/recording",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/event",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/event",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/server-configurations",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/server-configurations",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/health/camera/21b39942-e205-4b19-96f5-06e1991f0376/network-settings",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/health/camera/{id}/network-settings",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/api/v1/health/run-check",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/api/v1/health/run-check",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/health/camera/21b39942-e205-4b19-96f5-06e1991f0376/video-image",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/health/camera/{id}/video-image",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/upload/document",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/upload/document",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/health/camera/21b39942-e205-4b19-96f5-06e1991f0376",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/health/camera/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/12d049e2-d927-484d-9650-e89ed4804c74/stream-settings",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/master-configurations/{id}/stream-settings",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/devices/master-configurations",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/64c0a65b-1431-4709-ac10-9f6eb8d399e3/recording",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/master-configurations/{id}/recording",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/64c0a65b-1431-4709-ac10-9f6eb8d399e3/health",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/master-configurations/{id}/health",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/64c0a65b-1431-4709-ac10-9f6eb8d399e3/event",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/master-configurations/{id}/event",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/cfc73291-1cb4-42ff-b1ef-81146f03b375/default",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/master-configurations/{id}/default",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/cfc73291-1cb4-42ff-b1ef-81146f03b375/duplicate",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/devices/master-configurations/{id}/duplicate",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "DELETE",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/master-configurations/f634fd25-0077-4def-859f-0c8f015ff359",
+    "query" : "",
+    "expectedStatus" : 204,
+    "normalizedPath" : "/devices/master-configurations/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/devices/21b39942-e205-4b19-96f5-06e1991f0376/replace",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/devices/{id}/replace",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/alert-events/alert-acknowledged/fd6c260a-08ed-4cc5-a313-0fd43fd9a673",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/alert-events/alert-acknowledged/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/alert-events/42d8fd14-e66c-4ee9-992e-61175f4f5a98/assignable-users",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/alert-events/{id}/assignable-users",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/alert-events/assign-alert-users/42d8fd14-e66c-4ee9-992e-61175f4f5a98",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/alert-events/assign-alert-users/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/license/online/validate",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/license/online/validate",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/license/projects/P0001/licenses",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/license/projects/P0001/licenses",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/license/online/activate",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/license/online/activate",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/license/refresh-expiry",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/license/refresh-expiry",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/users",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/onboarding/users",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/users/787f8e5a-db5a-4b83-9bab-0817d88882cc/sites",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/onboarding/users/{id}/sites",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/users/787f8e5a-db5a-4b83-9bab-0817d88882cc/nodes",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/onboarding/users/{id}/nodes",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/auth/change-password",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/auth/change-password",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/auth/forgot-password",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/auth/forgot-password",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/auth/forgot-password-verify-otp",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/auth/forgot-password-verify-otp",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/auth/reset-password",
+    "query" : "",
+    "expectedStatus" : 400,
+    "normalizedPath" : "/auth/reset-password",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/users/787f8e5a-db5a-4b83-9bab-0817d88882cc/",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/onboarding/users/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/auth/unlock-user",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/auth/unlock-user",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/users/787f8e5a-db5a-4b83-9bab-0817d88882cc/generate-temp-password",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/users/{id}/generate-temp-password",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "DELETE",
+    "host" : "192.168.1.145:3000",
+    "path" : "/onboarding/users/0909b519-f529-499a-8d19-640ea783fb49",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/onboarding/users/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/organizations/0d55c782-cd7f-4e30-95aa-dd5cafe7a958",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/organizations/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/projects/c7d6b4ca-6caa-4b83-84dc-36535fc8fe1b/",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/projects/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/quality-check/sections",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/quality-check/sections",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/quality-check/questions",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/quality-check/questions",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/quality-check/sections",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/quality-check/sections",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/quality-check/sections/f285b6de-4cc8-4cd8-b1d0-c73fa53b8b56",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/quality-check/sections/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/quality-check/questions",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/quality-check/questions",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/quality-check/questions/d3094474-63b2-44ee-a57e-3dcb6d1d2868",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/quality-check/questions/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "DELETE",
+    "host" : "192.168.1.145:3000",
+    "path" : "/quality-check/questions/95f26e6c-92d6-4e32-84f1-f0710d20e89d",
+    "query" : "",
+    "expectedStatus" : 204,
+    "normalizedPath" : "/quality-check/questions/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/views/9fb27f70-2a11-46a2-964d-7405d4f1fff0",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/views/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/views",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/views",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "DELETE",
+    "host" : "192.168.1.145:3000",
+    "path" : "/views/a26ca777-ffc9-4ae9-b51c-89d3720b32ec",
+    "query" : "",
+    "expectedStatus" : 204,
+    "normalizedPath" : "/views/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/sequences",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/sequences",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/sequences/live-details/bulk",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/sequences/live-details/bulk",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/sequences/f20ba6f6-22fb-45e5-8d1e-ec06a5e74322",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/sequences/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PATCH",
+    "host" : "192.168.1.145:3000",
+    "path" : "/sequences/f20ba6f6-22fb-45e5-8d1e-ec06a5e74322",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/sequences/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "DELETE",
+    "host" : "192.168.1.145:3000",
+    "path" : "/sequences/adb1ea18-ab88-48e0-bcc7-79f45ab96bde",
+    "query" : "",
+    "expectedStatus" : 204,
+    "normalizedPath" : "/sequences/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/custom-maps",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/custom-maps",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/custom-maps/a06b0353-ee51-484e-9f1a-c3dfa63b63b5",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/custom-maps/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/custom-maps",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/custom-maps",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "PUT",
+    "host" : "192.168.1.145:3000",
+    "path" : "/custom-maps/34f5b336-ada2-4082-be90-69bbf756dc61",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/custom-maps/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "DELETE",
+    "host" : "192.168.1.145:3000",
+    "path" : "/custom-maps/34f5b336-ada2-4082-be90-69bbf756dc61",
+    "query" : "",
+    "expectedStatus" : 204,
+    "normalizedPath" : "/custom-maps/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/recording/image",
+    "query" : "deviceId=468ad044-4072-451c-ae5d-9aae1b00971c&timestamp=1787301824&saveSnapshot=true",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/recording/image",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/export/snapshot",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/export/snapshot",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/project-hierarchy/device/bc6e0c81-62fc-47a7-ac99-98abd86b24ad/contact-details",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/project-hierarchy/device/{id}/contact-details",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/bookmarks/list",
+    "query" : "startTime=2026-08-21T18:30:00.000Z&endTime=2026-08-22T09:01:00.000Z&page=1&limit=10",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/bookmarks/list",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/export/list",
+    "query" : "resourceType=clip&page=1&limit=10",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/export/list",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/export/download",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/export/download",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/export/downloads-log/list",
+    "query" : "resourceIds=f951241f-a43f-4a72-9e92-36f0c0bf2ac2&page=1&limit=10",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/export/downloads-log/list",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "DELETE",
+    "host" : "192.168.1.145:3000",
+    "path" : "/export/282caf58-ddac-4967-895e-f02ac051c50e",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/export/{id}",
+    "authObservedInSample" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  } ]
+}

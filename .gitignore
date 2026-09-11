@@ -1,0 +1,28 @@
+# Build output
+target/
+
+# Soak-test evidence (screenshots, traces, reports)
+target/soak-test/
+target/soak-results/
+target/screenshots/
+screenshots/
+logs/
+
+# Log files - they contain internal hostnames and IPs
+*.log
+Automation.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local configuration containing credentials - copy config.properties.example instead
+src/main/resources/config.local.properties
