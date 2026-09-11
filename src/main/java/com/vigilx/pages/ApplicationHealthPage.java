@@ -27,29 +27,6 @@ public class ApplicationHealthPage extends BasePage {
     }
     public boolean validateDevices() { return openLinkAndCheck("Devices", "Online"); }
 
-    /**
-     * Switches to one tab on the Dashboard and confirms it became the active tab.
-     *
-     * <p>Read-only: this only clicks the tab - the same action the recorded flow performs
-     * ({@code page.getByRole('tab', { name: 'Alerts' }).click()}, then {@code 'Device'}, then
-     * {@code 'Infra'}) - so the caller's {@link com.vigilx.monitoring.PageApiTracker} can observe
-     * that tab's API traffic exactly like every other page here. Nothing on the tab is submitted
-     * or mutated.
-     */
-    public boolean validateDashboardTab(String tabName) {
-        try {
-            Locator tab = page.getByRole(AriaRole.TAB,
-                    new Page.GetByRoleOptions().setName(tabName).setExact(false)).first();
-            tab.click(new Locator.ClickOptions().setTimeout(10000));
-            waitAfterPageNavigation();
-            String selected = tab.getAttribute("aria-selected");
-            return selected == null ? tab.isVisible() : "true".equalsIgnoreCase(selected);
-        } catch (Exception exception) {
-            System.err.println("[DASHBOARD TAB] '" + tabName + "' did not activate: " + exception.getMessage());
-            return false;
-        }
-    }
-
     public boolean validateUsersAndRoles() { return openTextNavigationAndCheck("Users & Roles", "User Management"); }
     public boolean validateOrganisation() { return openTextNavigationAndCheck("Organisation", "Organization Information"); }
 
