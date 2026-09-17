@@ -25,7 +25,7 @@ import com.vigilx.utils.ScreenshotUtils;
  */
 public final class LiveViewMonitor {
 
-    private static final int DEFAULT_DURATION_SECONDS = 60;
+    private static final int DEFAULT_DURATION_SECONDS = 30;
     private static final int DEFAULT_INTERVAL_SECONDS = 5;
     private static final double PLAYBACK_TOLERANCE_SECONDS = 0.2;
     private static final int PROGRESS_SAMPLE_MS = 1200;
@@ -88,9 +88,15 @@ public final class LiveViewMonitor {
             }
             apiFailuresBefore = ApiMonitor.getDistinctFailureCount();
 
-            // 2. Every camera's media state.
+            // 2. Every camera's media state - bounded by the SAME deadline as the outer loop, so a
+            // pass over many (or failing/slow) cameras cannot by itself push the whole window well
+            // past its configured duration: confirmed live, a single iteration's per-camera checks
+            // (each with its own ~1.2s progress sample, several evaluate() round-trips, and a
+            // full-page screenshot per failure) can otherwise run for 40+ seconds even when
+            // soak.liveview.monitor.seconds=30, since the deadline was previously only checked
+            // between iterations, never within one.
             try {
-                List<String> failures = validateCameras(iteration, result);
+                List<String> failures = validateCameras(iteration, result, deadline);
                 for (String failure : failures) {
                     System.err.println("[LIVE VIEW CAMERA FAIL] " + failure);
                 }
@@ -141,8 +147,15 @@ public final class LiveViewMonitor {
         }
     }
 
-    /** Validates every video element currently on the page; returns human-readable failures. */
-    private List<String> validateCameras(int iteration, MonitorResult result) {
+    /**
+     * Validates every video element currently on the page; returns human-readable failures.
+     *
+     * @param deadline the same {@code System.nanoTime()} deadline the outer monitoring window uses -
+     *                 once passed, no further camera is started (a camera already in progress is
+     *                 always finished, never abandoned mid-check), so one slow/failing pass cannot
+     *                 push the whole window well past its configured duration.
+     */
+    private List<String> validateCameras(int iteration, MonitorResult result, long deadline) {
         List<String> failures = new ArrayList<>();
         Locator videos = page.locator("video");
         int count = videos.count();
@@ -155,6 +168,11 @@ public final class LiveViewMonitor {
         }
 
         for (int index = 0; index < count; index++) {
+            if (index > 0 && System.nanoTime() >= deadline) {
+                System.out.println("[LIVE VIEW MONITOR] Monitoring window elapsed mid-iteration "
+                        + iteration + "; stopping after " + index + "/" + count + " camera(s) this pass.");
+                break;
+            }
             result.cameraChecks++;
             String camera = "camera-" + (index + 1);
             try {

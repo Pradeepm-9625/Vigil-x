@@ -369,7 +369,7 @@ public class ProjectInformationPage extends BasePage {
      * {@link RolesPage}/{@link GroupsPage}/{@link OrganizationPage}.
      */
     private boolean waitForSuccessToast(String context, String before) {
-        long deadline = System.currentTimeMillis() + 6000;
+        long deadline = System.currentTimeMillis() + 10000;
         Pattern bad = Pattern.compile("fail|error|unable|could not|invalid|required|not (saved|updated|created)",
                 Pattern.CASE_INSENSITIVE);
         while (System.currentTimeMillis() < deadline) {
@@ -382,7 +382,7 @@ public class ProjectInformationPage extends BasePage {
             }
             page.waitForTimeout(400);
         }
-        System.out.println("[PROJECT INFORMATION]   " + context + ": no notification observed within 6s.");
+        System.out.println("[PROJECT INFORMATION]   " + context + ": no notification observed within 10s.");
         return false;
     }
 

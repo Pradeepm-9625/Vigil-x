@@ -1,14 +1,10 @@
 package com.vigilx.monitoring;
 
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.List;
-import java.util.Locale;
 
 import com.microsoft.playwright.Page;
 import com.vigilx.config.ConfigReader;
 import com.vigilx.reporting.SoakReporter;
-import com.vigilx.reporting.SoakRunContext;
 import com.vigilx.utils.ScreenshotUtils;
 
 /**
@@ -39,13 +35,13 @@ public final class PageApiTracker {
     private static final int DEFAULT_PAGE_TIMEOUT_MS = 30000;
     private static final int DEFAULT_QUIET_PERIOD_MS = 1200;
     private static final int POLL_INTERVAL_MS = 250;
-    private static final String DEFAULT_SCREENSHOT_ROOT = "target/soak-test/screenshots";
 
     private final Page page;
     private final String pageName;
     private final int failuresBefore;
     private final int responsesBefore;
     private final long startedNanos;
+    private volatile String lastFailureScreenshot;
 
     private PageApiTracker(Page page, String pageName) {
         this.page = page;
@@ -78,17 +74,30 @@ public final class PageApiTracker {
         return finish(false);
     }
 
+    /** Same as {@link #finish(boolean, String, Throwable)}, with no failure reason/exception to log. */
+    public ApiMonitor.PageApiResult finish(boolean uiPassed) {
+        return finish(uiPassed, null, null);
+    }
+
     /**
      * Waits for this page's API traffic to drain, then produces and records the result.
      *
-     * <p>A screenshot is taken only when the page's UI validation failed. If the UI rendered
-     * correctly and only a background API failed, an image of a healthy page proves nothing - the
-     * failure is already fully described in the API log. Set
-     * {@code api.page.screenshot.on.api.failure=true} to capture those too.
+     * <p>Evidence is captured whenever the page's own UI validation failed - regardless of API
+     * health, since a pure UI failure with every API healthy previously produced no screenshot at
+     * all. A background-only API failure (UI passed) is still screenshotted only when
+     * {@code api.page.screenshot.on.api.failure=true}, since a healthy-looking page proves nothing
+     * extra there and the failure is already fully described in the API log.
      *
-     * @param uiPassed whether the page's own UI validation succeeded
+     * <p>If the check that just ran already captured its own failure evidence (most existing
+     * validations do, via their own {@code fail()}), that screenshot is reused via
+     * {@link ScreenshotUtils#consumeLastCapturedScreenshot()} instead of taking a second, duplicate
+     * one - {@link #lastFailureScreenshot()} always reflects whichever one was used.
+     *
+     * @param uiPassed       whether the page's own UI validation succeeded
+     * @param failureMessage a short reason for the UI failure, or {@code null}
+     * @param throwable      the exception that caused the UI failure, or {@code null}
      */
-    public ApiMonitor.PageApiResult finish(boolean uiPassed) {
+    public ApiMonitor.PageApiResult finish(boolean uiPassed, String failureMessage, Throwable throwable) {
         List<String> pending;
         try {
             pending = waitForApis();
@@ -103,9 +112,9 @@ public final class PageApiTracker {
             ApiMonitor.recordPageResult(result);
             System.out.println(result.render());
 
-            // Screenshot only when the UI itself is wrong; a healthy page is not useful evidence.
-            if (!result.isPassed() && (!uiPassed || screenshotOnApiFailure())) {
-                captureScreenshot(result);
+            boolean apiFailed = !result.isPassed();
+            if (!uiPassed || (apiFailed && screenshotOnApiFailure())) {
+                captureScreenshot(uiPassed, failureMessage, throwable);
             }
         } catch (Exception exception) {
             System.err.println("[PAGE API] Could not build the result for " + pageName + ": "
@@ -113,6 +122,16 @@ public final class PageApiTracker {
             return ApiMonitor.buildPageResult(pageName, failuresBefore, responsesBefore, List.of());
         }
         return result;
+    }
+
+    /**
+     * The failure screenshot path from the most recent {@link #finish} call - either one this
+     * check already captured on its own, or the one taken here as a safety net - or {@code null}
+     * when the check passed cleanly. Read this after {@link #finish} to attach evidence to the
+     * page's own failure record.
+     */
+    public String lastFailureScreenshot() {
+        return lastFailureScreenshot;
     }
 
     /**
@@ -166,15 +185,24 @@ public final class PageApiTracker {
     }
 
     /**
-     * Evidence for a failed page API validation, filed under the run's page-specific screenshot
-     * folder and registered so the API failure records can cross-reference it.
+     * Evidence for a failed page, filed under the run's Page/Tab Soak Test folder (with a
+     * companion failure log) and registered so the API failure records can cross-reference it.
+     *
+     * <p>Reuses the check's own failure screenshot when it already took one (via
+     * {@link ScreenshotUtils#consumeLastCapturedScreenshot()}) instead of capturing a second,
+     * duplicate image for the same failure; only takes a new one itself as a safety net for checks
+     * that have no failure-capture of their own.
      */
-    private void captureScreenshot(ApiMonitor.PageApiResult result) {
+    private void captureScreenshot(boolean uiPassed, String failureMessage, Throwable throwable) {
         try {
-            String root = ConfigReader.getOrDefault("soak.screenshot.root", DEFAULT_SCREENSHOT_ROOT);
-            Path directory = Paths.get(root, SoakRunContext.screenshotFolder(pageName));
-            String name = slug(pageName) + (result.timeouts() > 0 ? "-api-timeout" : "-api-failure");
-            String path = ScreenshotUtils.captureTo(page, directory, name);
+            String path = ScreenshotUtils.consumeLastCapturedScreenshot();
+            if (path == null) {
+                String reason = failureMessage != null ? failureMessage
+                        : (uiPassed ? pageName + " had failing API(s)" : pageName + " UI validation failed");
+                path = ScreenshotUtils.captureFailure(page, pageName,
+                        "SoakHealthCheckTest.runConfiguredHealthCheck", reason, throwable);
+            }
+            lastFailureScreenshot = path;
             SoakReporter.registerScreenshot(pageName, path);
         } catch (Exception exception) {
             System.err.println("[PAGE API] Screenshot failed for " + pageName + ": " + exception.getMessage());
@@ -208,11 +236,4 @@ public final class PageApiTracker {
         }
     }
 
-    private static String slug(String value) {
-        if (value == null || value.isBlank()) {
-            return "page";
-        }
-        String slug = value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("(^-|-$)", "");
-        return slug.isBlank() ? "page" : slug;
-    }
 }

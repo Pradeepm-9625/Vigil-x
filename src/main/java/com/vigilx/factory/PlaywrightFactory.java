@@ -1,5 +1,8 @@
 package com.vigilx.factory;
 
+import java.util.Collections;
+import java.util.List;
+
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
@@ -30,6 +33,15 @@ public final class PlaywrightFactory {
 
         playwright = Playwright.create();
 
+        // Headed runs: launch the actual OS window maximized (--start-maximized) instead of a
+        // fixed 1920x1080 content viewport that may not match - or may be smaller/positioned
+        // oddly against - the real screen, which is what was cutting off the right-hand side of
+        // the page during a visible run. Chromium-based browsers (chromium/chrome/edge) support
+        // this launch arg directly; Firefox/WebKit do not take Chromium args, so they keep their
+        // existing behavior. Headless runs are completely unaffected either way - there is no real
+        // screen to maximize into, so they keep the same fixed 1920x1080 viewport as before.
+        List<String> maximizedArgs = headless ? Collections.emptyList() : List.of("--start-maximized");
+
         switch (browserName.toLowerCase()) {
 
             case "firefox":
@@ -56,7 +68,8 @@ public final class PlaywrightFactory {
                         new BrowserType.LaunchOptions()
                                 .setChannel("msedge")
                                 .setHeadless(headless)
-                                .setSlowMo((double) slowMo));
+                                .setSlowMo((double) slowMo)
+                                .setArgs(maximizedArgs));
 
                 break;
 
@@ -66,7 +79,8 @@ public final class PlaywrightFactory {
                         new BrowserType.LaunchOptions()
                                 .setChannel("chrome")
                                 .setHeadless(headless)
-                                .setSlowMo((double) slowMo));
+                                .setSlowMo((double) slowMo)
+                                .setArgs(maximizedArgs));
 
                 break;
 
@@ -77,13 +91,18 @@ public final class PlaywrightFactory {
                 browser = playwright.chromium().launch(
                         new BrowserType.LaunchOptions()
                                 .setHeadless(headless)
-                                .setSlowMo((double) slowMo));
+                                .setSlowMo((double) slowMo)
+                                .setArgs(maximizedArgs));
 
         }
 
-        browserContext = browser.newContext(
-                new Browser.NewContextOptions()
-                        .setViewportSize(1920,1080));
+        // Headed: pass a null viewport so the page renders at the real (now maximized) window
+        // size instead of being forced back down to a fixed 1920x1080 content area - this is what
+        // actually makes the page fill the visible screen. Headless: unchanged, fixed 1920x1080.
+        Browser.NewContextOptions contextOptions = headless
+                ? new Browser.NewContextOptions().setViewportSize(1920, 1080)
+                : new Browser.NewContextOptions().setViewportSize(null);
+        browserContext = browser.newContext(contextOptions);
 
         // Attached before the first page exists, so no request can be missed and popups/new pages
         // opened later are covered too.

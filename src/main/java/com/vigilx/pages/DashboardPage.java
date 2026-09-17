@@ -6,6 +6,7 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.AriaRole;
 import com.microsoft.playwright.options.WaitForSelectorState;
+import com.vigilx.utils.SoakUiUtils;
 
 /**
  * Dashboard Page Object
@@ -186,6 +187,59 @@ public class DashboardPage extends BasePage {
                 return false;
             }
         }
+    }
+
+    //====================================================
+    // Dashboard tabs (Overview / Alerts / Device / Infra)
+    //====================================================
+
+    private static final int TAB_TIMEOUT_MS = 10000;
+
+    /**
+     * Clicks the Dashboard's own "Alerts", "Device" and "Infra" tabs (siblings of "Overview" in the
+     * {@code role=tablist, aria-label="Dashboard sections"} strip) and confirms each one's content
+     * panel genuinely switches - not just that the tab itself becomes {@code aria-selected}, which
+     * only proves the click landed, not that the underlying panel changed. Each tab is confirmed via
+     * a stable, tab-exclusive heading (never a dynamic count/value that changes run to run):
+     * "Recent Critical Alerts" for Alerts, "Offline Status" for Device, "CPU Usage" for Infra -
+     * all three confirmed live to be absent from the default Overview panel and to appear only once
+     * their own tab is selected.
+     */
+    public boolean validateDashboardTabs() {
+        boolean alerts = switchTabAndVerify("Alerts", "Recent Critical Alerts");
+        boolean device = switchTabAndVerify("Device", "Offline Status");
+        boolean infra = switchTabAndVerify("Infra", "CPU Usage");
+        System.out.println("[DASHBOARD]   Tabs: Alerts=" + alerts + " Device=" + device + " Infra=" + infra);
+        return alerts && device && infra;
+    }
+
+    /**
+     * Clicks the tab named {@code tabName}, confirms it became {@code aria-selected}, then confirms
+     * {@code contentSignal} - a heading unique to that tab's panel - actually became visible.
+     */
+    private boolean switchTabAndVerify(String tabName, String contentSignal) {
+        Locator tab = page.getByRole(AriaRole.TAB, new Page.GetByRoleOptions().setName(tabName).setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(tab, TAB_TIMEOUT_MS)) {
+            System.err.println("[DASHBOARD]   '" + tabName + "' tab not found.");
+            return false;
+        }
+        try {
+            tab.click(new Locator.ClickOptions().setTimeout(TAB_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[DASHBOARD]   '" + tabName + "' tab could not be clicked: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+
+        String selected = tab.getAttribute("aria-selected");
+        boolean tabSelected = "true".equalsIgnoreCase(selected);
+
+        Locator content = page.getByText(contentSignal, new Page.GetByTextOptions().setExact(true)).first();
+        boolean contentSwitched = SoakUiUtils.waitVisible(content, TAB_TIMEOUT_MS);
+
+        System.out.println("[DASHBOARD]   '" + tabName + "' tab selected=" + tabSelected
+                + ", content ('" + contentSignal + "') switched=" + contentSwitched);
+        return tabSelected && contentSwitched;
     }
 
     /**

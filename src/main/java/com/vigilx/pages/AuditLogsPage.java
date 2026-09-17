@@ -19,6 +19,7 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Response;
 import com.microsoft.playwright.options.AriaRole;
+import com.vigilx.config.ConfigReader;
 import com.vigilx.utils.SoakUiUtils;
 
 /**
@@ -79,6 +80,102 @@ public class AuditLogsPage extends BasePage {
         return navigated && pageOk && clearedVerified && exported && fileOk && dataOk;
     }
 
+    /**
+     * Additive entry point for the post-Sequence Audit Logs validation. Confirmed live via a real
+     * recording: this is a DIFFERENT screen from {@link #navigateToAuditLogs()}'s Settings -&gt;
+     * Users &amp; Roles -&gt; Audit Logs tab (used only by {@link #runAuditLogsExportFlow()} and its
+     * existing callers, untouched) - the Live View area has its own "Audit Logs" section at
+     * {@code /live-views/audit-logs}, reached from the same sidebar as My Views / Cameras /
+     * Sequence. This method therefore navigates there directly via
+     * {@link #navigateToLiveViewAuditLogs()} rather than reusing {@link #runAuditLogsExportFlow()},
+     * then reuses every other existing granular step ({@link #verifyAuditLogsPage()},
+     * {@link #clearDateTimeFilter()}, {@link #exportAuditLogs()}, {@link #verifyDownloadedFile},
+     * {@link #verifyExportedAuditLogData}) as-is - their locators are the same accessible names on
+     * both screens. Searches for a value expected to match nothing and confirms "No records found",
+     * then - best-effort, since this depends on what audit data already exists in this environment -
+     * clears the search and searches for {@code existingSearchText} to confirm real rows come back.
+     * The positive search is logged but never gates the overall result.
+     */
+    public boolean runAuditLogsSearchFlow(String nonExistentSearchText, String existingSearchText) {
+        boolean navigated = navigateToLiveViewAuditLogs();
+        boolean pageOk = navigated && verifyAuditLogsPage();
+        boolean cleared = navigated && clearDateTimeFilter();
+        boolean clearedVerified = cleared && verifyDateTimeFilterCleared();
+        boolean exported = navigated && exportAuditLogs();
+        boolean fileOk = true;
+        boolean dataOk = true;
+        if (exported && lastDownload != null) {
+            Path saved = verifyDownloadedFile(lastDownload);
+            fileOk = saved != null;
+            dataOk = fileOk && verifyExportedAuditLogData(saved);
+        }
+        boolean negativeSearchOk = navigated && searchAuditLogs(nonExistentSearchText) && verifyNoRecordsFound();
+        boolean positiveSearchOk = true;
+        if (navigated && existingSearchText != null && !existingSearchText.isBlank()) {
+            positiveSearchOk = searchAuditLogs("") && searchAuditLogs(existingSearchText)
+                    && verifySearchResultsPresent();
+            if (!positiveSearchOk) {
+                System.out.println("[AUDIT LOGS]   Positive search for '" + existingSearchText + "' did not"
+                        + " find matching rows in this environment (best-effort, not gating).");
+            }
+        }
+        System.out.println("[AUDIT LOGS] Live View Audit Logs flow: navigated=" + navigated + " pageVerified="
+                + pageOk + " filterCleared=" + cleared + " filterClearedVerified=" + clearedVerified
+                + " exported=" + exported + " fileValid=" + fileOk + " dataValid=" + dataOk
+                + " negativeSearch=" + negativeSearchOk + " positiveSearch(best-effort)=" + positiveSearchOk);
+        return navigated && pageOk && clearedVerified && exported && fileOk && dataOk && negativeSearchOk;
+    }
+
+    /**
+     * Additive entry point for the post-Snapshot Audit Logs validation, reached from the Archive
+     * page's own "Exports" area rather than Settings -&gt; Users &amp; Roles or the Live View
+     * sidebar's {@code /live-views/audit-logs}: confirmed live via a real recording, the Archive
+     * page has its own "Audit Logs" navigation button (a sibling of "Exports") landing on
+     * {@code /live-views/archive/audit-logs}. Deliberately minimal - only the steps actually
+     * required: {@link #navigateToArchiveAuditLogs()} -&gt; {@link #clearDateTimeFilter()} -&gt;
+     * {@link #exportAuditLogs()} -&gt; {@link #verifyDownloadedFile(Download)}. No search, no
+     * additional date filtering, and no page/column verification beyond what those existing,
+     * reused methods already do - {@link #runAuditLogsExportFlow()} and
+     * {@link #runAuditLogsSearchFlow(String, String)} are untouched and still cover their own,
+     * fuller flows on their own screens.
+     */
+    public boolean runArchiveAuditLogsExportFlow() {
+        boolean navigated = navigateToArchiveAuditLogs();
+        boolean cleared = navigated && clearDateTimeFilter();
+        boolean exported = navigated && exportAuditLogs();
+        boolean fileOk = false;
+        if (exported && lastDownload != null) {
+            fileOk = verifyDownloadedFile(lastDownload) != null;
+        }
+        System.out.println("[AUDIT LOGS] Archive Audit Logs export flow: navigated=" + navigated
+                + " filterCleared=" + cleared + " exported=" + exported + " fileValid=" + fileOk);
+        return navigated && cleared && exported && fileOk;
+    }
+
+    /**
+     * Additive entry point for the post-Master-Configuration Audit Logs validation, reached from
+     * the "Devices" left-nav group's own "Audit Logs" link (a sibling of "Master Configuration",
+     * confirmed live via a real recording) landing on {@code /devices/audit-logs} - a fourth,
+     * distinct screen from {@link #navigateToAuditLogs()}, {@link #navigateToLiveViewAuditLogs()}
+     * and {@link #navigateToArchiveAuditLogs()}. Deliberately minimal, matching
+     * {@link #runArchiveAuditLogsExportFlow()}'s shape: {@link #navigateToDevicesAuditLogs()} -&gt;
+     * {@link #clearDateTimeFilter()} -&gt; {@link #exportAuditLogs()} -&gt;
+     * {@link #verifyDownloadedFile(Download)}. No search, no additional date filtering - every
+     * other existing Audit Logs flow is untouched.
+     */
+    public boolean runDevicesAuditLogsExportFlow() {
+        boolean navigated = navigateToDevicesAuditLogs();
+        boolean cleared = navigated && clearDateTimeFilter();
+        boolean exported = navigated && exportAuditLogs();
+        boolean fileOk = false;
+        if (exported && lastDownload != null) {
+            fileOk = verifyDownloadedFile(lastDownload) != null;
+        }
+        System.out.println("[AUDIT LOGS] Devices Audit Logs export flow: navigated=" + navigated
+                + " filterCleared=" + cleared + " exported=" + exported + " fileValid=" + fileOk);
+        return navigated && cleared && exported && fileOk;
+    }
+
     // ---------------------------------------------------------------------
     // Navigation
     // ---------------------------------------------------------------------
@@ -132,6 +229,92 @@ public class AuditLogsPage extends BasePage {
         return opened;
     }
 
+    /**
+     * Navigates directly to the Live View area's OWN "Audit Logs" screen
+     * ({@code /live-views/audit-logs}) - confirmed live via a real recording to be a distinct
+     * screen from {@link #navigateToAuditLogs()}'s Settings -&gt; Users &amp; Roles -&gt; Audit Logs
+     * tab, reached instead from the same left sidebar as My Views / Cameras / Sequence. Used only by
+     * {@link #runAuditLogsSearchFlow(String, String)} - {@link #navigateToAuditLogs()} and its
+     * existing callers are untouched.
+     */
+    public boolean navigateToLiveViewAuditLogs() {
+        try {
+            String baseUrl = ConfigReader.get("base.url").replace("/onboarding", "");
+            navigateTo(baseUrl + "/live-views/audit-logs");
+        } catch (Exception exception) {
+            System.err.println("[AUDIT LOGS]   Could not navigate to Live View Audit Logs: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+        boolean opened = SoakUiUtils.waitVisible(exportButton(), ELEMENT_TIMEOUT_MS)
+                || SoakUiUtils.waitVisible(addFilterButton(), ELEMENT_TIMEOUT_MS);
+        System.out.println("[AUDIT LOGS] Live View Audit Logs opened: " + (opened ? "YES" : "NO"));
+        return opened;
+    }
+
+    /**
+     * Clicks the Archive page's OWN "Audit Logs" navigation button - confirmed live via a real
+     * recording to be a sibling of the "Exports" button already used by
+     * {@link ArchiveExportValidation}, landing on {@code /live-views/archive/audit-logs}: a third,
+     * distinct screen from both {@link #navigateToAuditLogs()} (Settings -&gt; Users &amp; Roles)
+     * and {@link #navigateToLiveViewAuditLogs()} ({@code /live-views/audit-logs}), neither of which
+     * reaches this URL - so neither is reused here, matching this codebase's existing precedent of
+     * one small navigation method per distinct real entry point rather than overloading one method
+     * for three different screens. Used only by {@link #runArchiveAuditLogsExportFlow()}; every
+     * other navigation method above is untouched.
+     */
+    public boolean navigateToArchiveAuditLogs() {
+        Locator auditLogsNav = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Audit Logs").setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(auditLogsNav, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[AUDIT LOGS]   Archive 'Audit Logs' navigation control not found.");
+            return false;
+        }
+        try {
+            auditLogsNav.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[AUDIT LOGS]   Archive 'Audit Logs' could not be clicked: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+        boolean opened = SoakUiUtils.waitVisible(exportButton(), ELEMENT_TIMEOUT_MS)
+                || SoakUiUtils.waitVisible(clearDateFilterButton(), ELEMENT_TIMEOUT_MS);
+        System.out.println("[AUDIT LOGS] Archive Audit Logs opened: " + (opened ? "YES" : "NO"));
+        return opened;
+    }
+
+    /**
+     * Clicks the "Devices" left-nav group's own "Audit Logs" link - confirmed live via a real
+     * recording to be a sibling of the "Master Configuration" link (both appear once "Devices" is
+     * expanded), landing on {@code /devices/audit-logs}: a fourth, distinct screen from every other
+     * {@code navigateTo...AuditLogs} method above, none of which reach this URL. Assumes the
+     * "Devices" group is already expanded (true immediately after
+     * {@link MasterConfigurationValidation#open()} runs, which this flow always follows); if the
+     * link is not yet visible for any other reason, this fails cleanly rather than guessing at
+     * how to expand "Devices" itself, matching {@link MasterConfigurationValidation#open()}'s own
+     * navigation. Used only by {@link #runDevicesAuditLogsExportFlow()}.
+     */
+    public boolean navigateToDevicesAuditLogs() {
+        Locator auditLogsLink = page.getByRole(AriaRole.LINK,
+                new Page.GetByRoleOptions().setName("Audit Logs").setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(auditLogsLink, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[AUDIT LOGS]   'Audit Logs' link (Devices area) not found.");
+            return false;
+        }
+        try {
+            auditLogsLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(600);
+        } catch (Exception exception) {
+            System.err.println("[AUDIT LOGS]   'Audit Logs' link (Devices area) could not be clicked: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+        boolean opened = SoakUiUtils.waitVisible(exportButton(), ELEMENT_TIMEOUT_MS)
+                || SoakUiUtils.waitVisible(clearDateFilterButton(), ELEMENT_TIMEOUT_MS);
+        System.out.println("[AUDIT LOGS] Devices Audit Logs opened: " + (opened ? "YES" : "NO"));
+        return opened;
+    }
+
     // ---------------------------------------------------------------------
     // Page verification
     // ---------------------------------------------------------------------
@@ -144,9 +327,13 @@ public class AuditLogsPage extends BasePage {
      * best-effort here rather than gated on.
      */
     public boolean verifyAuditLogsPage() {
+        // "Add Filter" is logged best-effort, not gated on - confirmed live: it can be absent in a
+        // build/state where "Export" (the control this whole flow actually depends on) is present
+        // and fully working, so requiring both made an otherwise-successful export flow report
+        // FAIL over an unrelated, optional control.
         boolean addFilterOk = SoakUiUtils.waitVisible(addFilterButton(), ELEMENT_TIMEOUT_MS);
         boolean exportOk = SoakUiUtils.waitVisible(exportButton(), ELEMENT_TIMEOUT_MS);
-        System.out.println("[AUDIT LOGS]   'Add Filter' present: " + addFilterOk
+        System.out.println("[AUDIT LOGS]   'Add Filter' present(best-effort): " + addFilterOk
                 + ", 'Export' present: " + exportOk);
 
         for (String column : new String[] {"Audit ID", "Date & Time", "User", "Action"}) {
@@ -155,7 +342,7 @@ public class AuditLogsPage extends BasePage {
             System.out.println("[AUDIT LOGS]   Column header '" + column + "' present: " + present
                     + (present ? "" : " (no rows currently loaded, or the build labels it differently)"));
         }
-        return addFilterOk && exportOk;
+        return exportOk;
     }
 
     // ---------------------------------------------------------------------
@@ -163,9 +350,12 @@ public class AuditLogsPage extends BasePage {
     // ---------------------------------------------------------------------
 
     /**
-     * Clicks "Clear Date & Time filter" if a date filter chip is currently active. Its absence is
-     * not a failure - the filter may already be unset - so this always returns {@code true} unless
-     * the button is present but the click itself fails.
+     * Clicks "Clear Date & Time filter" if a date filter chip is currently active, monitoring the
+     * background Audit Logs list API the click is expected to trigger (the list refresh once the
+     * date range is removed) via the same lightweight per-call response listener already used in
+     * {@link #exportAuditLogs()} - not a new API framework. Its absence is not a failure - the
+     * filter may already be unset - so this always returns {@code true} unless the button is
+     * present but the click itself fails.
      */
     public boolean clearDateTimeFilter() {
         Locator clearDate = clearDateFilterButton();
@@ -173,15 +363,28 @@ public class AuditLogsPage extends BasePage {
             System.out.println("[AUDIT LOGS]   No active Date & Time filter to clear.");
             return true;
         }
+        AtomicReference<Response> captured = new AtomicReference<>();
+        Consumer<Response> listener = response -> {
+            if (captured.get() == null && isAuditListResponse(response)) {
+                captured.set(response);
+            }
+        };
+        page.onResponse(listener);
         try {
             clearDate.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-            page.waitForTimeout(500);
+            long deadline = System.currentTimeMillis() + 8000;
+            while (captured.get() == null && System.currentTimeMillis() < deadline) {
+                page.waitForTimeout(200);
+            }
+            logApiOutcome("Clear Date & Time filter", captured.get());
             System.out.println("[AUDIT LOGS]   Date & Time filter cleared.");
             return true;
         } catch (Exception exception) {
             System.err.println("[AUDIT LOGS]   'Clear Date & Time filter' could not be clicked: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
             return false;
+        } finally {
+            page.offResponse(listener);
         }
     }
 
@@ -259,6 +462,90 @@ public class AuditLogsPage extends BasePage {
     }
 
     // ---------------------------------------------------------------------
+    // Search
+    // ---------------------------------------------------------------------
+
+    /**
+     * Fills the "Search Devices Audit Logs" field (matched by a case-insensitive substring on its
+     * accessible name, since this codebase has repeatedly found a recorded exact string does not
+     * always match a live build's actual wording) with {@code searchText}, monitoring the
+     * background Audit Logs list API the search is expected to trigger. An empty string clears the
+     * field. The API result is logged as supporting evidence only - the real, gating truth for a
+     * search is what {@link #verifyNoRecordsFound()} / {@link #verifySearchResultsPresent()} see
+     * rendered afterward, since a client-side-filtered grid may legitimately not re-hit the API at
+     * all.
+     */
+    public boolean searchAuditLogs(String searchText) {
+        Locator searchBox = searchBox();
+        if (!SoakUiUtils.waitVisible(searchBox, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[AUDIT LOGS]   Search field not found.");
+            return false;
+        }
+        AtomicReference<Response> captured = new AtomicReference<>();
+        Consumer<Response> listener = response -> {
+            if (captured.get() == null && isAuditListResponse(response)) {
+                captured.set(response);
+            }
+        };
+        page.onResponse(listener);
+        try {
+            searchBox.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            searchBox.fill(searchText == null ? "" : searchText);
+            long deadline = System.currentTimeMillis() + 8000;
+            while (captured.get() == null && System.currentTimeMillis() < deadline) {
+                page.waitForTimeout(200);
+            }
+            logApiOutcome("Search audit logs ('" + searchText + "')", captured.get());
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[AUDIT LOGS]   searchAuditLogs('" + searchText + "') failed: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        } finally {
+            page.offResponse(listener);
+        }
+    }
+
+    /** Confirms "No records found" (or an equivalent empty-state message) is actually displayed. */
+    public boolean verifyNoRecordsFound() {
+        Locator noRecords = page.getByText(Pattern.compile("no records found", Pattern.CASE_INSENSITIVE)).first();
+        boolean shown = SoakUiUtils.waitVisible(noRecords, ELEMENT_TIMEOUT_MS);
+        System.out.println("[AUDIT LOGS]   'No records found' displayed: " + shown);
+        return shown;
+    }
+
+    /** Confirms the search returned real rows: the "No records found" empty-state is NOT shown. */
+    public boolean verifySearchResultsPresent() {
+        boolean noRecordsShown = SoakUiUtils.isVisibleQuietly(
+                page.getByText(Pattern.compile("no records found", Pattern.CASE_INSENSITIVE)).first());
+        System.out.println("[AUDIT LOGS]   Search results present (no 'No records found' shown): "
+                + !noRecordsShown);
+        return !noRecordsShown;
+    }
+
+    /** True for a response backing the Audit Logs list/search call. Broad on purpose. */
+    private boolean isAuditListResponse(Response response) {
+        try {
+            String method = response.request().method();
+            String url = response.url().toLowerCase(Locale.ROOT);
+            return method.equals("GET") && url.contains("audit") && !url.contains("export");
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    private boolean logApiOutcome(String context, Response response) {
+        boolean apiOk = response == null || (response.status() >= 200 && response.status() < 300);
+        if (response != null) {
+            System.out.println("[AUDIT LOGS]   " + context + " API: " + safeMethod(response) + " "
+                    + shortPath(response.url()) + " -> " + response.status() + " (" + (apiOk ? "PASS" : "FAIL") + ")");
+        } else {
+            System.out.println("[AUDIT LOGS]   " + context + ": no matching API observed within 8s.");
+        }
+        return apiOk;
+    }
+
+    // ---------------------------------------------------------------------
     // Downloaded file validation
     // ---------------------------------------------------------------------
 
@@ -314,7 +601,15 @@ public class AuditLogsPage extends BasePage {
         String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
         List<String> headers;
         try {
-            if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+            if (looksLikeXmlSpreadsheet(file)) {
+                // Confirmed live: this build's ".xls" export is actually the legacy "Excel XML
+                // Spreadsheet 2003" (SpreadsheetML) text format, not a real binary XLS/OOXML file -
+                // Apache POI's WorkbookFactory rejects it outright ("unsupported file type: XML"),
+                // which previously failed this whole check even though the export itself is a
+                // perfectly real, non-empty, correctly-named file. Read its header row as XML
+                // instead of forcing it through POI.
+                headers = readXmlSpreadsheetHeaders(file);
+            } else if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
                 headers = readSpreadsheetHeaders(file);
             } else {
                 headers = readCsvHeaders(file);
@@ -336,6 +631,40 @@ public class AuditLogsPage extends BasePage {
             System.out.println("[AUDIT LOGS]     expected column '" + expected + "' present: " + present);
         }
         return true;
+    }
+
+    /** Sniffs the first ~200 bytes for an XML prolog/root - the legacy "Excel XML Spreadsheet" cue. */
+    private boolean looksLikeXmlSpreadsheet(Path file) {
+        try (InputStream in = Files.newInputStream(file)) {
+            byte[] head = in.readNBytes(200);
+            String text = new String(head, StandardCharsets.UTF_8);
+            return text.contains("<?xml") || text.contains("<Workbook") || text.contains("urn:schemas-microsoft-com:office");
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    /**
+     * Extracts the header row's cell text from a legacy "Excel XML Spreadsheet 2003" file via a
+     * light regex scan of its first {@code <Row>...</Row>} - not a full XML parse (unnecessary for
+     * one row of plain text cells), and not a new general-purpose file-processing utility, just
+     * enough to log the real column names for this one, already-confirmed-broken-in-POI format.
+     */
+    private List<String> readXmlSpreadsheetHeaders(Path file) throws IOException {
+        String content = Files.readString(file, StandardCharsets.UTF_8);
+        int rowStart = content.indexOf("<Row");
+        if (rowStart < 0) {
+            return List.of();
+        }
+        int rowEnd = content.indexOf("</Row>", rowStart);
+        String firstRow = rowEnd > rowStart ? content.substring(rowStart, rowEnd) : content.substring(rowStart);
+        List<String> headers = new ArrayList<>();
+        java.util.regex.Matcher matcher = Pattern.compile("<Data[^>]*>(.*?)</Data>", Pattern.DOTALL)
+                .matcher(firstRow);
+        while (matcher.find()) {
+            headers.add(matcher.group(1).trim());
+        }
+        return headers;
     }
 
     private List<String> readCsvHeaders(Path file) throws IOException {
@@ -390,6 +719,13 @@ public class AuditLogsPage extends BasePage {
     private Locator clearDateFilterButton() {
         return page.getByRole(AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Clear Date & Time filter").setExact(false)).first();
+    }
+
+    /** Matched by a case-insensitive substring - see {@link #searchAuditLogs(String)}. */
+    private Locator searchBox() {
+        return page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName(Pattern.compile("search.*audit", Pattern.CASE_INSENSITIVE)))
+                .first();
     }
 
     // ---------------------------------------------------------------------
