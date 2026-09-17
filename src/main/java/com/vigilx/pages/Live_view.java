@@ -46,7 +46,11 @@ public class Live_view extends BasePage {
         Locator operatorPanel =
                 page.locator(".operator-panel__body");
 
-        if (!operatorPanel.isVisible()) {
+        try {
+            operatorPanel.waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(15000));
+        } catch (Exception exception) {
 
             System.err.println(
                     "[FAIL] Live View operator panel is not visible."
@@ -65,17 +69,22 @@ public class Live_view extends BasePage {
         );
 
         // ---------------------------------------------------------
-        // 3. Wait for camera streams to load
-        // ---------------------------------------------------------
-
-        page.waitForTimeout(5000);
-
-        // ---------------------------------------------------------
-        // 4. Find camera containers
+        // 3. Find camera containers once the Live View panel is ready
         // ---------------------------------------------------------
 
         Locator cameraCells =
                 page.getByRole(AriaRole.GRIDCELL);
+
+        try {
+            cameraCells.first().waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(15000));
+        } catch (Exception exception) {
+            System.err.println("[FAIL] Live View camera tiles did not become visible: "
+                    + exception.getMessage());
+            captureLiveViewScreenshot(screenshotDir, "camera-tiles-not-ready");
+            return false;
+        }
 
         int cameraCount = cameraCells.count();
 
@@ -99,7 +108,7 @@ public class Live_view extends BasePage {
         }
 
         // ---------------------------------------------------------
-        // 4b. Distinguish "view has no cameras" from "streams are broken"
+        // 3b. Distinguish "view has no cameras" from "streams are broken"
         // ---------------------------------------------------------
 
         // A saved view with nothing assigned still renders empty "Add Camera" tiles. Checking each
@@ -124,87 +133,20 @@ public class Live_view extends BasePage {
         }
 
         // ---------------------------------------------------------
-        // 5. First validation
+        // 4. Validate every camera's stream
         // ---------------------------------------------------------
+
+        // A single pass is enough here: this confirms the stream becomes available. Sustained
+        // availability over time is the dedicated LiveViewMonitor's job (run right after this
+        // returns), not a second immediate re-check of the exact same state.
 
         System.out.println(
                 "-------------------------------------------------"
         );
 
         System.out.println(
-                "[INFO] Starting initial camera validation."
+                "[INFO] Starting camera stream validation."
         );
-
-        for (int i = 0; i < cameraCount; i++) {
-
-            Locator cameraCell =
-                    cameraCells.nth(i);
-
-            validateCameraStream(
-                    cameraCell,
-                    i + 1,
-                    screenshotDir
-            );
-        }
-
-        // ---------------------------------------------------------
-        // 6. Wait 30 seconds
-        // ---------------------------------------------------------
-
-        System.out.println(
-                "[INFO] Waiting 30 seconds before rechecking streams..."
-        );
-
-        page.waitForTimeout(30000);
-
-        // ---------------------------------------------------------
-        // 7. Second validation
-        // ---------------------------------------------------------
-
-        System.out.println(
-                "-------------------------------------------------"
-        );
-
-        System.out.println(
-                "[INFO] Starting second camera validation."
-        );
-
-        for (int i = 0; i < cameraCount; i++) {
-
-            Locator cameraCell =
-                    cameraCells.nth(i);
-
-            boolean result =
-                    validateCameraStream(
-                            cameraCell,
-                            i + 1,
-                            screenshotDir
-                    );
-
-            if (!result) {
-                overallPassed = false;
-            }
-        }
-
-        // ---------------------------------------------------------
-        // 8. Optional additional 30-second validation
-        // ---------------------------------------------------------
-
-        System.out.println(
-                "[INFO] Waiting another 30 seconds..."
-        );
-
-        page.waitForTimeout(30000);
-
-        System.out.println(
-                "[INFO] Starting final camera validation."
-        );
-
-        // Recalculate because the DOM may have changed
-        cameraCells =
-                page.getByRole(AriaRole.GRIDCELL);
-
-        cameraCount = cameraCells.count();
 
         for (int i = 0; i < cameraCount; i++) {
 
@@ -280,9 +222,16 @@ public class Live_view extends BasePage {
                                 captureLiveViewScreenshot(screenshotDir, "camera-" + cameraNumber + "-no-media");
                                 return false;
                         }
-                        media.waitFor(new Locator.WaitForOptions()
-                                        .setState(WaitForSelectorState.VISIBLE)
-                                        .setTimeout(15000));
+                        // Fast path: the grid/panel above is already confirmed visible, so a healthy tile's
+                        // media is normally visible immediately - skip the bounded wait entirely rather than
+                        // always paying its cost. Only a genuinely slow/broken tile falls through to it, and
+                        // even then it is capped well below the old 15s so one bad tile cannot dominate the
+                        // whole camera loop.
+                        if (!media.isVisible()) {
+                                media.waitFor(new Locator.WaitForOptions()
+                                                .setState(WaitForSelectorState.VISIBLE)
+                                                .setTimeout(5000));
+                        }
                         String tagName = media.evaluate("element => element.tagName.toLowerCase()").toString();
                         if ("video".equals(tagName)) {
                                 String source = media.evaluate("element => element.currentSrc || element.src || ''").toString();
@@ -291,9 +240,14 @@ public class Live_view extends BasePage {
                                         return false;
                                 }
                                 media.evaluate("element => { element.muted = true; element.play(); }");
-                                page.waitForTimeout(1000);
-                                boolean playing = (Boolean) media.evaluate(
-                                                "element => !element.paused && !element.ended && element.currentTime > 0");
+                                // currentTime > 0 right after calling play() is racy - the element needs a beat
+                                // to actually start decoding. Poll for it (condition-based, not a blind sleep)
+                                // instead of checking once immediately or waiting a fixed amount.
+                                boolean playing = pollUntilTrue(() -> {
+                                        Object result = media.evaluate(
+                                                        "element => !element.paused && !element.ended && element.currentTime > 0");
+                                        return Boolean.TRUE.equals(result);
+                                }, 2000);
                                 if (!playing) {
                                         captureLiveViewScreenshot(screenshotDir, "camera-" + cameraNumber + "-not-playing");
                                         return false;
@@ -303,6 +257,24 @@ public class Live_view extends BasePage {
                 } catch (Exception exception) {
                         captureLiveViewScreenshot(screenshotDir, "camera-" + cameraNumber + "-exception");
                         return false;
+                }
+        }
+
+        /** Polls {@code condition} until true or {@code timeoutMs} elapses; bounded, never a blind sleep. */
+        private boolean pollUntilTrue(java.util.function.BooleanSupplier condition, long timeoutMs) {
+                long deadline = System.currentTimeMillis() + timeoutMs;
+                while (true) {
+                        try {
+                                if (condition.getAsBoolean()) {
+                                        return true;
+                                }
+                        } catch (Exception ignored) {
+                                // Transient evaluation error - treat as "not yet true" and keep polling.
+                        }
+                        if (System.currentTimeMillis() >= deadline) {
+                                return false;
+                        }
+                        page.waitForTimeout(100);
                 }
         }
 

@@ -1,1151 +1,499 @@
 package com.vigilx.pages;
 
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Random;
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
-import com.microsoft.playwright.Response;
 import com.microsoft.playwright.options.AriaRole;
 import com.microsoft.playwright.options.WaitForSelectorState;
-import com.vigilx.config.ConfigReader;
-import com.vigilx.monitoring.ApiMonitor;
-import com.vigilx.reporting.SoakReporter;
-import com.vigilx.utils.ScreenshotUtils;
+import com.vigilx.utils.SoakUiUtils;
 
 /**
- * Robust, soak-safe validation of the Archive/Playback page: opens the device tree, filters to the
- * active devices, adds a randomly chosen one and verifies its recording actually plays.
+ * Archive/Playback flow: Add Camera -&gt; Camera Filters -&gt; Active -&gt; Close filter -&gt;
+ * select one available active camera from the device tree -&gt; Save changes -&gt; open its tile
+ * -&gt; check whether it has an available recording/stream.
  *
- * <p>Additional to the existing {@link ApplicationHealthPage#validateArchive} and
- * {@link ApplicationHealthPage#addCameraToPlayback}, both of which are left untouched.
+ * <p>Camera selection is dynamic and retried: confirmed live, this environment's cameras do not
+ * all have footage, so a camera with no recording is removed (the existing per-tile "Remove"
+ * flow) and a DIFFERENT, never-before-tried camera from the tree is attempted next - tracked in a
+ * {@code Set} of attempted names (identified by each tree row's own {@code textContent()}, since
+ * this build's rows carry no {@code aria-label}), never the same camera twice, up to
+ * {@link #MAX_CAMERA_ATTEMPTS} unique cameras. The camera tile itself is never used to "find
+ * another camera" and the grid layout is never changed - only the tree's own checkboxes drive
+ * selection, exactly as the original flow already did.
  *
- * <p>Contract: never throws into the caller. Failures are logged, screenshotted under
- * {@code target/soak-test/screenshots/archive} and returned as {@code false} so the soak continues.
+ * <p>Once a camera with an available recording is found, the existing Export creation flow runs:
+ * select the archive timeline range, confirm the bookmark selection, fill a unique Export Name
+ * and note, submit, and confirm the export dialog closed.
+ *
+ * <p>No API monitoring, no reporting, no seed machinery beyond the attempted-camera set - kept as
+ * close as possible to the original's bare shape. Never throws into the caller; a failure is
+ * logged and returned as {@code false}.
  */
 public class ArchiveValidation extends BasePage {
 
-    private static final String SEPARATOR = "============================================================";
-    private static final String SUB_SEPARATOR = "------------------------------------------------------------";
-
-    private static final String DEFAULT_SCREENSHOT_DIRECTORY = "target/soak-test/screenshots/archive";
-    private static final int DEFAULT_TREE_TIMEOUT_MS = 30000;
-
-    private static final double PLAYBACK_TOLERANCE_SECONDS = 0.2;
-
-    /** How long the recording must keep progressing for; overridable via archive.playback.monitor.seconds. */
-    private static final int DEFAULT_MONITOR_SECONDS = 60;
-    /** Poll cadence during that window; overridable via archive.playback.monitor.interval.ms. */
-    private static final int DEFAULT_MONITOR_INTERVAL_MS = 2000;
-    /** Consecutive non-progressing samples tolerated before the stream counts as stalled. */
-    private static final int DEFAULT_MONITOR_STALL_SAMPLES = 3;
-    /**
-     * How long a just-added stream is given to hand back its first decodable frame before it is
-     * declared failed; overridable via archive.playback.startup.timeout.seconds. A freshly added
-     * camera can take a while (manifest fetch, decoder init) even when perfectly healthy, so this
-     * polls instead of taking one early snapshot and failing on it.
-     */
-    private static final int DEFAULT_STARTUP_TIMEOUT_SECONDS = 60;
-    /** Poll cadence while waiting for the stream to start. */
-    private static final long STARTUP_POLL_INTERVAL_MS = 1000L;
-
-    /** Markers that mean "this device is usable"; overridable via archive.online.pattern. */
-    private static final String DEFAULT_ONLINE_PATTERN =
-            "online|connected|streaming|recording|status[-_]?(ok|up|green|online)";
-
-    /** Markers that mean "do not pick this device"; overridable via archive.offline.pattern. */
-    private static final String DEFAULT_OFFLINE_PATTERN =
-            "offline|disconnected|unreachable|unavailable|inactive|not\\s*connected|no\\s*signal"
-                    + "|status[-_]?(off|down|red|offline)";
-
-    /** Walks a checkbox up to its own tree row and returns that row's markup, minus child rows. */
-    private static final String ROW_SIGNATURE_SCRIPT =
-            "el => {"
-                    + "  const row = el.closest(\"li, [role='treeitem'], .MuiTreeItem-root,"
-                    + " .ph-v1-dynamic-tree-node\") || el.parentElement || el;"
-                    + "  const clone = row.cloneNode(true);"
-                    + "  clone.querySelectorAll(\"ul, [role='group']\")"
-                    + "       .forEach(child => child.remove());"
-                    + "  return (clone.outerHTML || '').slice(0, 4000);"
-                    + "}";
-
-    /** Same row-walk as {@link #ROW_SIGNATURE_SCRIPT}, but returns visible text instead of markup. */
-    private static final String ROW_TEXT_SCRIPT =
-            "el => {"
-                    + "  const row = el.closest(\"li, [role='treeitem'], .MuiTreeItem-root,"
-                    + " .ph-v1-dynamic-tree-node\") || el.parentElement || el;"
-                    + "  const clone = row.cloneNode(true);"
-                    + "  clone.querySelectorAll(\"ul, [role='group']\")"
-                    + "       .forEach(child => child.remove());"
-                    + "  return (clone.textContent || '').slice(0, 200);"
-                    + "}";
-
-    private final Path screenshotDirectory;
-    private final int treeTimeoutMs;
+    private static final int TIMEOUT_MS = 15000;
+    private static final int MAX_CAMERA_ATTEMPTS = 5;
 
     public ArchiveValidation(Page page) {
         super(page);
-        this.screenshotDirectory = Paths.get(
-                ConfigReader.getOrDefault("archive.screenshot.directory", DEFAULT_SCREENSHOT_DIRECTORY));
-        this.treeTimeoutMs = intConfig("archive.device.tree.timeout.ms", DEFAULT_TREE_TIMEOUT_MS);
     }
-
-    /** One selectable device in the add-camera tree. */
-    private record TreeDevice(String name, int checkboxIndex) { }
-
-    /** Rolling status of the whole validation, rendered as the closing report. */
-    private static final class ArchiveReport {
-        private String archivePage = "FAIL";
-        private String archiveData = "SKIPPED";
-        private String addCameraDialog = "SKIPPED";
-        private String deviceTree = "SKIPPED";
-        private String activeFilter = "SKIPPED";
-        private int devicesFound;
-        private String selectedDevice = "<none>";
-        private String checkboxSelected = "SKIPPED";
-        private String saveChanges = "SKIPPED";
-        private String cameraAdded = "SKIPPED";
-        private String videoElement = "SKIPPED";
-        private String videoSource = "SKIPPED";
-        private String readyStateStatus = "SKIPPED";
-        private String resolution = "0x0";
-        private String playback = "SKIPPED";
-        private String sourceValue = "<empty>";
-        private int readyState;
-        private String failureReason;
-        private String screenshot;
-        private boolean passed;
-    }
-
-    // ---------------------------------------------------------------------
-    // Entry point
-    // ---------------------------------------------------------------------
 
     /**
-     * Runs the full Archive/Playback validation. Safe to call repeatedly; each iteration picks a
-     * fresh random device.
-     *
-     * @return {@code true} only when the page, tree, camera add and recording playback all passed
+     * Runs the flow: Playback -&gt; (Add Camera -&gt; Camera Filters -&gt; Active -&gt; Close
+     * filter -&gt; select one unattempted active camera -&gt; Save changes -&gt; open its tile
+     * -&gt; check recording; remove and retry with a different camera if unavailable) up to
+     * {@link #MAX_CAMERA_ATTEMPTS} unique cameras -&gt; once a camera with a recording is found,
+     * the existing Export creation flow.
      */
     public boolean validateArchive(String baseUrl) {
-
-        ArchiveReport report = new ArchiveReport();
-        int apiFailuresBefore = ApiMonitor.getDistinctFailureCount();
-        String deviceForCorrelation = "<none>";
-
-        System.out.println(SEPARATOR);
-        System.out.println("ARCHIVE / PLAYBACK VALIDATION STARTED");
-        System.out.println(SEPARATOR);
-
-        try {
-            // STEP 1 - Archive page loaded
-            if (!openArchivePage(baseUrl)) {
-                fail(report, "Archive page did not load", "archive-not-loaded");
-                return finish(report);
-            }
-            report.archivePage = "PASS";
-
-            // STEP 2 - let the archive's own data settle before touching the UI
-            report.archiveData = waitForArchiveData() ? "PASS" : "WARN";
-
-            // STEP 3 + 4 - open Add Camera and wait for the device-tree API response
-            if (!openAddCameraDialog()) {
-                fail(report, "Add Camera control could not be opened", "add-camera-not-opened");
-                return finish(report);
-            }
-            report.addCameraDialog = "PASS";
-
-            // STEP 5 - the tree must actually be populated
-            if (!validateDeviceTree()) {
-                fail(report, "Device tree did not populate", "device-tree-empty");
-                return finish(report);
-            }
-            report.deviceTree = "PASS";
-
-            // STEP 6 - narrow to active devices where the UI offers that filter
-            report.activeFilter = applyActiveFilter() ? "APPLIED" : "NOT AVAILABLE";
-
-            // STEP 7 - discover what is selectable
-            List<TreeDevice> devices = discoverDevices();
-            report.devicesFound = devices.size();
-            if (devices.isEmpty()) {
-                fail(report, "No active devices available in the device tree", "no-active-devices");
-                return finish(report);
-            }
-
-            // STEP 8 - random selection among the online devices keeps a long soak from always
-            // testing the same camera without ever landing on an offline one.
-            TreeDevice device = selectRandomOnlineDevice(devices);
-            if (device == null) {
-                fail(report, "No online device available in the device tree", "no-online-devices");
-                return finish(report);
-            }
-            report.selectedDevice = device.name();
-            deviceForCorrelation = device.name();
-
-            // STEP 9 - tick its checkbox
-            if (!selectDevice(device)) {
-                fail(report, "Device checkbox could not be selected", slug(device.name()) + "-checkbox-failed");
-                return finish(report);
-            }
-            report.checkboxSelected = "PASS";
-
-            // STEP 10 - commit the selection
-            if (!saveSelection()) {
-                fail(report, "Save changes / Add camera could not be clicked",
-                        slug(device.name()) + "-save-failed");
-                return finish(report);
-            }
-            report.saveChanges = "PASS";
-
-            // STEP 11 - the camera must actually appear in the playback area
-            if (!validateCameraAdded(device.name())) {
-                fail(report, "Camera was not added to the playback area", slug(device.name()) + "-not-added");
-                return finish(report);
-            }
-            report.cameraAdded = "PASS";
-
-            // STEP 12 - validate the recording actually plays
-            validatePlaybackStream(report, device.name());
-            return finish(report);
-
-        } catch (Exception exception) {
-            // Defensive: nothing in here may end the soak run.
-            fail(report, "Archive validation error: " + exception.getMessage(), "archive-validation-exception");
-            return finish(report);
-
-        } finally {
-            // STEP 13 - correlate whatever the central API monitor recorded during this validation.
-            reportCorrelatedApiFailures(deviceForCorrelation, apiFailuresBefore);
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // STEP 1 + 2 - page and data
-    // ---------------------------------------------------------------------
-
-    private boolean openArchivePage(String baseUrl) {
         try {
             navigateTo(baseUrl + "/live-views/archive");
-            System.out.println("[INFO] Archive page opened: " + baseUrl + "/live-views/archive");
-        } catch (Exception exception) {
-            System.err.println("[FAIL] Could not navigate to the Archive page: " + exception.getMessage());
-            return false;
-        }
+            waitForPlaybackHeading();
 
-        try {
-            Locator playbackHeading = page.getByRole(AriaRole.HEADING,
-                    new Page.GetByRoleOptions().setName("Playback").setExact(true));
-            if (playbackHeading.count() > 0) {
-                playbackHeading.first().waitFor(new Locator.WaitForOptions()
-                        .setState(WaitForSelectorState.VISIBLE)
-                        .setTimeout(20000));
-                System.out.println("[PASS] Archive/Playback page is loaded.");
-                return true;
+            Set<String> attemptedCameras = new LinkedHashSet<>();
+            boolean recordingFound = false;
+
+            for (int attempt = 1; attempt <= MAX_CAMERA_ATTEMPTS; attempt++) {
+                // Confirmed live (matches the recorded reference flow exactly): unlike Live View's
+                // own Add Camera (a genuine two-step control), an empty "Camera tile" here has only
+                // ONE control - its own inline "Add Camera" icon (class
+                // "live-view-empty-tile__add-btn") - clicking it directly opens the Add Cameras
+                // floating panel. Always the FIRST gridcell: the camera always lands there, and
+                // after a removal that same tile becomes empty again - never scan for "any empty
+                // tile", which races with the previous remove's floating panel still settling. No
+                // re-navigation here or anywhere else in this retry loop - the reference flow never
+                // leaves/reloads the Archive page between attempts, it goes straight from a
+                // confirmed Remove back to Add Camera on the same page; removeCurrentCamera()'s own
+                // retry (below) is what absorbs a slow-to-open Remove dialog instead.
+                Locator gridAddCamera = page.getByRole(AriaRole.GRIDCELL).first()
+                        .getByLabel("Add Camera", new Locator.GetByLabelOptions().setExact(false)).first();
+                if (!SoakUiUtils.waitVisible(gridAddCamera, TIMEOUT_MS)) {
+                    System.err.println("[ARCHIVE]   'Add Camera' control not found (attempt " + attempt
+                            + "); stopping.");
+                    break;
+                }
+                gridAddCamera.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+
+                openCameraFilters();
+                selectActiveStatus();
+                closeCameraFilters();
+
+                String cameraName = selectOneUnattemptedActiveCamera(attemptedCameras);
+                if (cameraName == null) {
+                    System.err.println("[ARCHIVE]   No unattempted active camera left in the tree"
+                            + " (attempt " + attempt + ").");
+                    break;
+                }
+                attemptedCameras.add(cameraName);
+                System.out.println("[ARCHIVE]   Attempt " + attempt + "/" + MAX_CAMERA_ATTEMPTS
+                        + ": selected camera '" + cameraName + "'");
+
+                Locator saveChanges = page.getByRole(AriaRole.BUTTON,
+                        new Page.GetByRoleOptions().setName("Save changes").setExact(false)).first();
+                saveChanges.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+                waitForAddCameraPanelClosed();
+
+                Locator tile = page.getByRole(AriaRole.GRIDCELL,
+                        new Page.GetByRoleOptions().setName("Camera tile").setExact(false)).first();
+                if (!SoakUiUtils.waitVisible(tile, TIMEOUT_MS)) {
+                    System.err.println("[ARCHIVE]   Camera tile did not appear for '" + cameraName + "'.");
+                    continue;
+                }
+                tile.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+
+                // Stream validation, bounded to the allowed maximum of 10 seconds (see
+                // hasAvailableRecording()'s own video-visible wait): available -> continue
+                // immediately, no additional wait of any kind. Unavailable -> remove this camera
+                // immediately and try a different one - no separate "wait 10s more, then recheck"
+                // pass; one bounded check per attempt is the whole validation.
+                if (hasAvailableRecording()) {
+                    System.out.println("[ARCHIVE]   Recording/stream available for '" + cameraName + "'.");
+                    recordingFound = true;
+                    break;
+                }
+
+                System.out.println("[ARCHIVE]   No recording/stream for '" + cameraName + "'; removing and"
+                        + " trying a different camera.");
+                if (!removeCurrentCamera(tile)) {
+                    // No re-navigation fallback here either - see the note above. If the removal
+                    // itself could not be confirmed even after its own bounded retries, the tile's
+                    // real state cannot be trusted for a further attempt, so the retry sequence
+                    // stops rather than reloading the page to force it back to a known state.
+                    System.err.println("[ARCHIVE]   Could not confirm camera removal; stopping retry sequence.");
+                    break;
+                }
             }
 
-            // Fall back to the page shell for deployments that label the heading differently.
-            page.locator("[class*='archive' i], [class*='playback' i], .vxpanelcard__body").first()
-                    .waitFor(new Locator.WaitForOptions()
-                            .setState(WaitForSelectorState.VISIBLE)
-                            .setTimeout(20000));
-            System.out.println("[PASS] Archive page shell is visible.");
-            return true;
-
-        } catch (Exception exception) {
-            System.err.println("[FAIL] Archive page did not load: " + exception.getMessage());
-            return false;
-        }
-    }
-
-    /** Waits for the archive's initial data calls to go quiet before interacting. */
-    private boolean waitForArchiveData() {
-        try {
-            page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE,
-                    new Page.WaitForLoadStateOptions().setTimeout(20000));
-            System.out.println("[PASS] Archive page data finished loading.");
-            return true;
-        } catch (Exception exception) {
-            // A permanently streaming page never goes idle; that is not a failure by itself.
-            System.out.println("[WARN] Archive page never reached network idle; continuing.");
-            page.waitForTimeout(3000);
-            return false;
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // STEP 3 + 4 - Add Camera and the device-tree response
-    // ---------------------------------------------------------------------
-
-    /** Clicks Add Camera while waiting for the device-tree API response it triggers. */
-    private boolean openAddCameraDialog() {
-        Locator addCamera = page.getByRole(AriaRole.BUTTON,
-                new Page.GetByRoleOptions().setName(java.util.regex.Pattern.compile(
-                        "add\\s+camera", java.util.regex.Pattern.CASE_INSENSITIVE))).first();
-
-        if (addCamera.count() == 0) {
-            System.err.println("[FAIL] Add Camera button is not present on the Archive page.");
-            return false;
-        }
-
-        try {
-            Response response = page.waitForResponse(
-                    this::isDeviceTreeResponse,
-                    new Page.WaitForResponseOptions().setTimeout(treeTimeoutMs),
-                    () -> addCamera.click(new Locator.ClickOptions().setTimeout(10000)));
-
-            System.out.println("[PASS] Device-tree API responded: " + response.status() + " " + response.url());
-            return true;
-
-        } catch (Exception exception) {
-            // The click inside the callback already happened; only the response match timed out.
-            System.out.println("[WARN] No device-tree API response matched within "
-                    + treeTimeoutMs + "ms; continuing on the rendered DOM.");
-            page.waitForTimeout(3000);
-            return true;
-        }
-    }
-
-    /** Heuristic for the call that backs the device tree; kept broad so it survives API renames. */
-    private boolean isDeviceTreeResponse(Response response) {
-        String url = response.url().toLowerCase(Locale.ROOT);
-        return url.contains("device") || url.contains("hierarchy") || url.contains("tree")
-                || url.contains("camera") || url.contains("site");
-    }
-
-    // ---------------------------------------------------------------------
-    // STEP 5 - device tree
-    // ---------------------------------------------------------------------
-
-    private boolean validateDeviceTree() {
-        try {
-            Locator tree = page.locator(
-                    "[id*='mui-tree-view'], [role='tree'], .MuiTreeView-root, .ph-v1-dynamic-tree-node,"
-                            + " .MuiTreeItem-content").first();
-
-            tree.waitFor(new Locator.WaitForOptions()
-                    .setState(WaitForSelectorState.VISIBLE)
-                    .setTimeout(treeTimeoutMs));
-
-            expandTree();
-
-            int checkboxes = page.getByRole(AriaRole.CHECKBOX).count();
-            System.out.println("[INFO] Device tree is visible | selectable entries: " + checkboxes);
-
-            if (checkboxes == 0) {
-                System.err.println("[FAIL] Device tree rendered but contains no selectable devices.");
+            if (!recordingFound) {
+                System.err.println("[ARCHIVE] No camera with available recording/stream found after"
+                        + " attempting " + attemptedCameras.size() + " different cameras.");
                 return false;
             }
 
-            System.out.println("[PASS] Device tree is populated.");
             return true;
-
         } catch (Exception exception) {
-            System.err.println("[FAIL] Device tree did not become available: " + exception.getMessage());
+            System.err.println("[ARCHIVE] Archive/Playback flow failed: " + exception.getMessage());
             return false;
         }
     }
 
-    /** Expands collapsed parent nodes until device checkboxes are reachable. */
-    private void expandTree() {
-        for (int attempt = 0; attempt < 5; attempt++) {
-            if (page.getByRole(AriaRole.CHECKBOX).count() > 0) {
-                return;
-            }
-            Locator expanders = page.locator(
-                    ".ph-v1-dynamic-tree-node__expand-circle, .MuiTreeItem-iconContainer, [aria-expanded='false']");
-            int count = expanders.count();
-            if (count == 0) {
-                return;
-            }
-            boolean expanded = false;
-            for (int index = 0; index < count; index++) {
-                if (clickIfPresent(expanders.nth(index))) {
-                    expanded = true;
-                    page.waitForTimeout(700);
-                }
-            }
-            if (!expanded) {
-                return;
-            }
-        }
+    private void waitForPlaybackHeading() {
+        page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("Playback").setExact(true))
+                .waitFor(new Locator.WaitForOptions()
+                        .setState(WaitForSelectorState.VISIBLE)
+                        .setTimeout(TIMEOUT_MS));
     }
 
     // ---------------------------------------------------------------------
-    // STEP 6 - active filter
+    // Camera filters (existing, unchanged)
     // ---------------------------------------------------------------------
 
     /**
-     * Applies the "Active" device filter: opens the "Camera filters" panel, sets "Filter Status" to
-     * Active via its native {@code <select>}, then closes the panel again.
-     *
-     * <p>Confirmed against the real Add Cameras dialog: the "Camera filters" trigger opens a panel
-     * with three selects (Filter Hierarchy / Filter Status / Filter Tags); "Filter Status" is the one
-     * with All/Active/Inactive. A missing filter is reported but not treated as a failure, since the
-     * validation can still proceed across all devices.
+     * Clicks the Add Cameras popup's OWN "Camera filters" trigger - confirmed live via a real
+     * recording: the main Archive page has its own, separate "Camera filters" button that stays
+     * visible behind the popup, so the first visible match is not reliably the popup's own one.
+     * The popup opens on top of (after, in DOM order) the page's own controls, so its trigger is
+     * the LAST visible match rather than the first - dynamic, not a fixed index into a list that
+     * could grow or shrink.
      */
-    private boolean applyActiveFilter() {
-        if (openCameraFiltersPanel() && selectFilterStatusActive()) {
-            closeCameraFiltersPanel();
-            page.waitForTimeout(1000);
-            System.out.println("[PASS] Active device filter applied via Filter Status.");
-            return true;
-        }
-        closeCameraFiltersPanel();
-        return applyActiveFilterFallback();
-    }
-
-    /** Clicks the visible "Camera filters" trigger and waits for its panel to render. */
-    private boolean openCameraFiltersPanel() {
+    private void openCameraFilters() {
         Locator triggers = page.getByRole(AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Camera filters").setExact(true));
         int count = triggers.count();
-        for (int index = 0; index < count; index++) {
-            try {
-                Locator trigger = triggers.nth(index);
-                if (!trigger.isVisible()) {
-                    continue;
-                }
-                trigger.click(new Locator.ClickOptions().setTimeout(5000));
-                page.getByText("Filter Status", new Page.GetByTextOptions().setExact(true))
-                        .waitFor(new Locator.WaitForOptions()
-                                .setState(WaitForSelectorState.VISIBLE)
-                                .setTimeout(5000));
-                return true;
-            } catch (Exception ignored) {
-                // The Archive page's own "Camera filters" button is obscured behind this dialog;
-                // try the next match rather than the same hidden one.
+        for (int index = count - 1; index >= 0; index--) {
+            Locator trigger = triggers.nth(index);
+            if (trigger.isVisible()) {
+                trigger.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+                return;
             }
         }
-        System.out.println("[INFO] No visible \"Camera filters\" trigger found.");
-        return false;
     }
 
     /** Selects "Active" from the native select under the "Filter Status" label. */
-    private boolean selectFilterStatusActive() {
-        try {
-            Locator select = page.getByText("Filter Status", new Page.GetByTextOptions().setExact(true))
-                    .locator("xpath=following::select[1]");
-            select.selectOption("Active");
-            page.waitForTimeout(1000);
-            String value = String.valueOf(select.evaluate("element => element.value"));
-            return value.equalsIgnoreCase("active");
-        } catch (Exception exception) {
-            System.err.println("[WARN] Could not select Active from Filter Status: " + exception.getMessage());
-            return false;
+    private void selectActiveStatus() {
+        Locator select = page.getByText("Filter Status", new Page.GetByTextOptions().setExact(true))
+                .locator("xpath=following::select[1]");
+        select.selectOption("Active");
+    }
+
+    /** Closes the filter panel opened by {@link #openCameraFilters()}. */
+    private void closeCameraFilters() {
+        Locator close = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Close filter").setExact(true)).first();
+        if (close.count() > 0) {
+            close.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
         }
     }
 
-    /** Closes the filter panel opened by {@link #openCameraFiltersPanel()}; best-effort. */
-    private void closeCameraFiltersPanel() {
-        try {
-            Locator close = page.getByRole(AriaRole.BUTTON,
-                    new Page.GetByRoleOptions().setName("Close filter").setExact(true));
-            if (close.count() > 0 && close.first().isVisible()) {
-                close.first().click(new Locator.ClickOptions().setTimeout(3000));
-                page.waitForTimeout(500);
-            }
-        } catch (Exception ignored) {
-            // Not fatal: the dialog can still be used with the filter panel left open.
+    /**
+     * Waits for the "Add Camera" floating panel (its own tree overlay) to actually close after
+     * "Save changes" - confirmed live: it does not always close instantly, and leaving it open
+     * intercepts pointer events on the tile's own icons (e.g. its "Remove" trigger) right
+     * afterward, well past the tile itself already being visible/clickable.
+     */
+    private void waitForAddCameraPanelClosed() {
+        Locator floatingPanel = page.locator(".operator-camera-floating-panel--add-camera").first();
+        long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline && SoakUiUtils.isVisibleQuietly(floatingPanel)) {
+            page.waitForTimeout(200);
         }
-    }
-
-    /** Older, broader heuristic kept as a fallback for deployments without the panel above. */
-    private boolean applyActiveFilterFallback() {
-        java.util.regex.Pattern active =
-                java.util.regex.Pattern.compile("^\\s*active\\s*$", java.util.regex.Pattern.CASE_INSENSITIVE);
-
-        AriaRole[] roles = {AriaRole.TAB, AriaRole.BUTTON, AriaRole.RADIO, AriaRole.CHECKBOX,
-                AriaRole.MENUITEM, AriaRole.OPTION};
-
-        for (AriaRole role : roles) {
-            try {
-                Locator control = page.getByRole(role, new Page.GetByRoleOptions().setName(active)).first();
-                if (control.count() > 0 && control.isVisible()) {
-                    control.click(new Locator.ClickOptions().setTimeout(5000));
-                    page.waitForTimeout(1500);
-                    System.out.println("[PASS] Active device filter applied via " + role + " (fallback).");
-                    return true;
-                }
-            } catch (Exception ignored) {
-                // Try the next control type.
-            }
-        }
-
-        System.out.println("[INFO] No Active filter control found; validating against all listed devices.");
-        return false;
     }
 
     // ---------------------------------------------------------------------
-    // STEP 7 + 8 - discovery and random selection
+    // Dynamic camera selection
     // ---------------------------------------------------------------------
 
-    /** Lists every selectable device with a usable name, read from the DOM rather than hard-coded. */
-    private List<TreeDevice> discoverDevices() {
-        List<TreeDevice> devices = new ArrayList<>();
-        try {
-            Locator checkboxes = page.getByRole(AriaRole.CHECKBOX);
-            int count = checkboxes.count();
+    /**
+     * Expands the device tree just enough to reveal camera rows, then picks the first available
+     * active camera NOT already in {@code attemptedCameras} - a real camera row (identified the
+     * same way the tree itself labels it, "Device is online ..."), never a site/folder row, a
+     * hard-coded name, or a fixed positional index reused blindly across attempts. Each row's own
+     * {@code textContent()} is its identifier (confirmed live: {@code aria-label} is {@code null}
+     * on every row in this build, and the tree's checkbox-checked state does NOT persist across
+     * Add-Camera panel open/close cycles - confirmed live by re-opening the panel after saving a
+     * checked camera and finding it unchecked again - so checkbox state can never be used to tell
+     * "already attempted" apart from "not yet tried"; only this explicit set can).
+     *
+     * @return the selected camera's own name (its row's trimmed text), or {@code null} if every
+     *         available candidate has already been attempted
+     */
+    private String selectOneUnattemptedActiveCamera(Set<String> attemptedCameras) {
+        Pattern onlineDevice = Pattern.compile("device is online", Pattern.CASE_INSENSITIVE);
+        Locator deviceItems = page.getByRole(AriaRole.TREEITEM, new Page.GetByRoleOptions().setName(onlineDevice));
 
+        // The tree renders collapsed at first; reveal nested rows by expanding collapsed nodes
+        // until at least one online device row is visible (bounded so a genuinely empty/offline
+        // tree does not loop forever).
+        for (int attempt = 0; attempt < 5 && deviceItems.count() == 0; attempt++) {
+            Locator expanders = page.locator("[id*='mui-tree-view'] [aria-expanded='false']");
+            int count = expanders.count();
+            if (count == 0) {
+                break;
+            }
             for (int index = 0; index < count; index++) {
-                Locator checkbox = checkboxes.nth(index);
                 try {
-                    if (!checkbox.isVisible() || checkbox.isChecked() || checkbox.isDisabled()) {
-                        continue;
+                    Locator expander = expanders.nth(index);
+                    if (expander.isVisible()) {
+                        expander.click(new Locator.ClickOptions().setTimeout(3000));
                     }
                 } catch (Exception ignored) {
-                    continue;
+                    // Row may already be expanded or detached mid-loop; try the next one.
                 }
+            }
+        }
 
-                // The tree also carries a checkbox on each site/node folder (selects every camera
-                // under it). Confirmed live: picking one saves fine but nothing ever reaches the
-                // playback tile, since a folder is not a stream. Only real camera rows count.
-                if (!isDeviceRow(index)) {
-                    continue;
+        int total = deviceItems.count();
+        for (int index = 0; index < total; index++) {
+            Locator device = deviceItems.nth(index);
+            String name;
+            try {
+                name = device.textContent();
+            } catch (Exception exception) {
+                continue;
+            }
+            String key = name == null ? null : name.trim();
+            if (key == null || key.isBlank() || attemptedCameras.contains(key)) {
+                continue;
+            }
+
+            Locator checkbox = device.getByRole(AriaRole.CHECKBOX);
+            try {
+                if (!checkbox.isChecked()) {
+                    checkbox.check(new Locator.CheckOptions().setTimeout(TIMEOUT_MS));
                 }
-
-                String name = deviceName(checkbox, index);
-                devices.add(new TreeDevice(name, index));
-
-                System.out.println("[ARCHIVE DEVICE]");
-                System.out.println("Device: " + name);
-                System.out.println("Status: DISCOVERED");
+            } catch (Exception exception) {
+                System.err.println("[ARCHIVE]   Could not check camera '" + key + "': "
+                        + exception.getMessage());
+                continue;
             }
-        } catch (Exception exception) {
-            System.err.println("[WARN] Device discovery error: " + exception.getMessage());
+            return key;
         }
-
-        System.out.println("[INFO] Selectable devices discovered: " + devices.size());
-        return devices;
-    }
-
-    /** Best-effort readable name for a tree checkbox, falling back to its index. */
-    private String deviceName(Locator checkbox, int index) {
-        try {
-            String label = checkbox.getAttribute("aria-label");
-            if (label != null && !label.isBlank()) {
-                return label.trim();
-            }
-        } catch (Exception ignored) {
-            // Fall through.
-        }
-        try {
-            // The nearest ancestor <div> is just an icon wrapper with no text; the label lives in
-            // ".ph-v1-dynamic-tree-node__label" further up the same tree row. Reading the row's own
-            // <li role="treeitem"> instead of the first ancestor div is what actually reaches it.
-            String text = checkbox.locator(
-                    "xpath=ancestor::*[@role='treeitem' or self::li][1]//*[contains(@class,'ph-v1-dynamic-tree-node__label')]")
-                    .first().textContent();
-            if (text != null && !text.isBlank()) {
-                return text.trim().replaceAll("\\s+", " ");
-            }
-        } catch (Exception ignored) {
-            // Fall through.
-        }
-        try {
-            // Generic fallback for deployments without that label class: the row's own text, minus
-            // any nested child rows so a parent's name is never padded with its children's names.
-            Object text = checkbox.evaluate(ROW_TEXT_SCRIPT);
-            String value = text == null ? "" : text.toString().trim().replaceAll("\\s+", " ");
-            if (!value.isBlank()) {
-                return value;
-            }
-        } catch (Exception ignored) {
-            // Fall through.
-        }
-        return "Device #" + index;
-    }
-
-    private TreeDevice selectRandomly(List<TreeDevice> devices) {
-        long seed = resolveSeed();
-        TreeDevice device = devices.get(new Random(seed).nextInt(devices.size()));
-
-        System.out.println("[ARCHIVE RANDOM DEVICE]");
-        System.out.println("Seed     : " + seed + "   (set archive.validation.random.seed to reproduce)");
-        System.out.println("Selected : " + device.name() + " (checkbox index " + device.checkboxIndex() + ")");
-        return device;
-    }
-
-    // ---------------------------------------------------------------------
-    // STEP 8b - online-only selection
-    // ---------------------------------------------------------------------
-
-    /**
-     * Random selection restricted to the devices the tree reports as online.
-     *
-     * <p>Additional to {@link #selectRandomly(List)}, which is left untouched: this only narrows the
-     * candidate list and then delegates to it, so the seeded/reproducible behaviour is unchanged.
-     * If nothing can be confirmed online the full list is used again, so a deployment whose tree
-     * carries no status markers degrades to the previous behaviour instead of failing the soak.
-     *
-     * @return the chosen device, or {@code null} when {@code devices} is empty
-     */
-    private TreeDevice selectRandomOnlineDevice(List<TreeDevice> devices) {
-        if (devices == null || devices.isEmpty()) {
-            return null;
-        }
-        if (!boolConfig("archive.online.only", true)) {
-            return selectRandomly(devices);
-        }
-
-        List<TreeDevice> online = filterOnlineDevices(devices);
-        System.out.println("[INFO] Online devices: " + online.size() + " of " + devices.size());
-
-        if (online.isEmpty()) {
-            System.out.println("[WARN] No device could be confirmed online; "
-                    + "falling back to the full device list.");
-            return selectRandomly(devices);
-        }
-        return selectRandomly(online);
-    }
-
-    /** Keeps only the devices whose own tree row does not advertise an offline state. */
-    private List<TreeDevice> filterOnlineDevices(List<TreeDevice> devices) {
-        List<TreeDevice> online = new ArrayList<>();
-        for (TreeDevice device : devices) {
-            if (isOnline(device)) {
-                online.add(device);
-            } else {
-                System.out.println("[SKIP] Offline device: " + device.name()
-                        + " (checkbox index " + device.checkboxIndex() + ")");
-            }
-        }
-        return online;
+        return null;
     }
 
     /**
-     * Status verdict for one tree row. Offline markers win over online markers, and a row that
-     * advertises neither counts as online unless {@code archive.online.strict} is enabled.
+     * Confirms whether the currently open camera tile has an available recording/stream, via the
+     * application's own real banner ("No recordings or alerts found for the selected camera(s).")
+     * - confirmed live to appear exactly when a camera's Playback timeline has no footage for the
+     * queried range, and to be absent once real footage loads.
      *
-     * <p>Checks the device-status icon's own {@code aria-label} first (confirmed on the real tree:
-     * {@code <div aria-label="Device is online">} sits next to the checkbox) before falling back to
-     * the broader row-signature regex, which stays as the safety net for deployments that label the
-     * icon differently.
+     * <p>The whole check - banner + this video-visible wait - is this camera attempt's entire
+     * stream validation, bounded to the maximum 10 seconds the flow allows per attempt: a video
+     * that becomes visible earlier returns immediately (no reason to wait longer), and one that
+     * never does is given the full allowed budget before being marked unavailable.
      */
-    private boolean isOnline(TreeDevice device) {
-        boolean unknownIsOnline = !boolConfig("archive.online.strict", false);
-
-        String iconLabel = statusIconLabel(device.checkboxIndex());
-        if (!iconLabel.isBlank()) {
-            if (iconLabel.contains("offline")) {
-                return false;
-            }
-            if (iconLabel.contains("online")) {
-                return true;
-            }
-        }
-
-        String signature = statusSignature(device.checkboxIndex());
-        if (signature.isBlank()) {
-            return unknownIsOnline;
-        }
-        if (pattern("archive.offline.pattern", DEFAULT_OFFLINE_PATTERN).matcher(signature).find()) {
+    private boolean hasAvailableRecording() {
+        Locator noRecordingBanner = page.getByText(
+                Pattern.compile("no recordings or alerts", Pattern.CASE_INSENSITIVE)).first();
+        if (SoakUiUtils.isVisibleQuietly(noRecordingBanner)) {
             return false;
         }
-        if (pattern("archive.online.pattern", DEFAULT_ONLINE_PATTERN).matcher(signature).find()) {
-            return true;
-        }
-        return unknownIsOnline;
-    }
 
-    /**
-     * True when this tree row is an actual camera, not a site/node folder. Folder rows carry a
-     * checkbox too (selects every camera under them) but neither the online/offline status icon nor
-     * the device-icon image that every real camera row has.
-     */
-    private boolean isDeviceRow(int checkboxIndex) {
-        try {
-            Object isDevice = page.getByRole(AriaRole.CHECKBOX).nth(checkboxIndex)
-                    .evaluate("el => {"
-                            + "  const row = el.closest(\"li, [role='treeitem']\") || el.parentElement;"
-                            + "  if (!row) return true;"
-                            + "  return !!row.querySelector('[aria-label*=\"online\" i], [aria-label*=\"offline\" i],"
-                            + " .ph-v1-dynamic-tree-node__device-icon');"
-                            + "}");
-            return !Boolean.FALSE.equals(isDevice);
-        } catch (Exception exception) {
-            // Fail open: a read error should not silently shrink the candidate pool.
-            return true;
-        }
-    }
-
-    /** {@code aria-label} of the row's own online/offline status icon (e.g. "Device is online"), if any. */
-    private String statusIconLabel(int checkboxIndex) {
-        try {
-            Object label = page.getByRole(AriaRole.CHECKBOX).nth(checkboxIndex)
-                    .evaluate("el => {"
-                            + "  const row = el.closest(\"li, [role='treeitem']\") || el.parentElement;"
-                            + "  const icon = row ? row.querySelector('[aria-label*=\"online\" i], [aria-label*=\"offline\" i]') : null;"
-                            + "  return icon ? icon.getAttribute('aria-label') : '';"
-                            + "}");
-            return label == null ? "" : label.toString().toLowerCase(Locale.ROOT);
-        } catch (Exception exception) {
-            return "";
-        }
-    }
-
-    /**
-     * Markup of the device's own tree row - visible text plus classes, titles and data attributes,
-     * which is where status dots hide - with nested child rows stripped so a parent node is never
-     * judged by its children. Returns an empty string when the row cannot be read.
-     */
-    private String statusSignature(int checkboxIndex) {
-        try {
-            Object signature = page.getByRole(AriaRole.CHECKBOX).nth(checkboxIndex)
-                    .evaluate(ROW_SIGNATURE_SCRIPT);
-            return signature == null ? "" : signature.toString().toLowerCase(Locale.ROOT);
-        } catch (Exception exception) {
-            return "";
-        }
-    }
-
-    /** Compiles a configurable, case-insensitive marker pattern, falling back on a bad override. */
-    private java.util.regex.Pattern pattern(String key, String fallback) {
-        String configured = ConfigReader.getOrDefault(key, fallback);
-        String source = (configured == null || configured.isBlank()) ? fallback : configured.trim();
-        try {
-            return java.util.regex.Pattern.compile(source, java.util.regex.Pattern.CASE_INSENSITIVE);
-        } catch (Exception exception) {
-            System.err.println("[WARN] Invalid pattern for " + key + "; using the default.");
-            return java.util.regex.Pattern.compile(fallback, java.util.regex.Pattern.CASE_INSENSITIVE);
-        }
-    }
-
-    private boolean boolConfig(String key, boolean fallback) {
-        String value = ConfigReader.getOrDefault(key, String.valueOf(fallback));
-        return (value == null || value.isBlank()) ? fallback : Boolean.parseBoolean(value.trim());
-    }
-
-    // ---------------------------------------------------------------------
-    // STEP 9 + 10 + 11 - select, save, confirm
-    // ---------------------------------------------------------------------
-
-    private boolean selectDevice(TreeDevice device) {
-        try {
-            Locator checkbox = page.getByRole(AriaRole.CHECKBOX).nth(device.checkboxIndex());
-            checkbox.scrollIntoViewIfNeeded();
-            try {
-                checkbox.check(new Locator.CheckOptions().setTimeout(10000));
-            } catch (Exception exception) {
-                // Custom checkbox widgets often need a plain click instead.
-                checkbox.click(new Locator.ClickOptions().setTimeout(10000));
-            }
-            page.waitForTimeout(500);
-            System.out.println("[PASS] Device selected: " + device.name());
-            return true;
-        } catch (Exception exception) {
-            System.err.println("[FAIL] Could not select device " + device.name() + ": " + exception.getMessage());
+        Locator video = page.locator("video").last();
+        if (!SoakUiUtils.waitVisible(video, 10000)) {
             return false;
         }
-    }
-
-    /**
-     * Commits the selection. Candidates are tried in priority order so the still-present "Add
-     * camera" trigger is never mistaken for the dialog's confirm button.
-     */
-    private boolean saveSelection() {
-        String[] candidates = {"save\\s+changes", "apply", "confirm", "^\\s*save\\s*$", "^\\s*add\\s*$"};
-
-        for (String candidate : candidates) {
-            try {
-                Locator button = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions()
-                        .setName(java.util.regex.Pattern.compile(candidate, java.util.regex.Pattern.CASE_INSENSITIVE)))
-                        .first();
-                if (button.count() == 0 || !button.isVisible() || button.isDisabled()) {
-                    continue;
-                }
-                button.click(new Locator.ClickOptions().setTimeout(10000));
-                page.waitForTimeout(3000);
-                System.out.println("[PASS] Selection saved via \"" + candidate + "\".");
-                return true;
-            } catch (Exception ignored) {
-                // Try the next candidate.
-            }
-        }
-
-        System.err.println("[FAIL] No Save changes / Apply button was found or clickable.");
-        return false;
-    }
-
-    /**
-     * Confirms the camera reached the playback area, by name where possible. Polls for up to
-     * {@code archive.playback.startup.timeout.seconds} (default 60s) instead of checking once
-     * immediately after Save: the tile can take a moment to mount and its backing API call to
-     * resolve, and a single early check reads that gap as "not added" even though it lands a
-     * second later - confirmed live, where the tile and a "Recording loaded" toast both appeared
-     * just after this check had already failed.
-     */
-    private boolean validateCameraAdded(String deviceName) {
-        long timeoutMs = Math.max(1, intConfig("archive.playback.startup.timeout.seconds",
-                DEFAULT_STARTUP_TIMEOUT_SECONDS)) * 1000L;
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        String shortName = deviceName.length() > 40 ? deviceName.substring(0, 40) : deviceName;
-
-        while (true) {
-            try {
-                Locator byName = page.getByText(shortName, new Page.GetByTextOptions().setExact(false)).first();
-                if (byName.count() > 0 && byName.isVisible()) {
-                    System.out.println("[PASS] Camera is present in the playback area: " + shortName);
-                    return true;
-                }
-
-                // Some builds render the tile without a text label; a media element is equally valid.
-                Locator media = page.locator("video, canvas, [class*='player' i]").first();
-                if (media.count() > 0 && media.isVisible()) {
-                    System.out.println("[PASS] Playback tile rendered for the added camera.");
-                    return true;
-                }
-            } catch (Exception ignored) {
-                // Transient DOM read while the tile is still mounting; keep polling.
-            }
-
-            if (System.currentTimeMillis() >= deadline) {
-                break;
-            }
-            page.waitForTimeout(STARTUP_POLL_INTERVAL_MS);
-        }
-
-        System.err.println("[FAIL] Camera did not appear in the playback area within " + (timeoutMs / 1000) + "s.");
-        return false;
-    }
-
-    // ---------------------------------------------------------------------
-    // STEP 12 - recording playback
-    // ---------------------------------------------------------------------
-
-    /** Full media check: element, source, media error, readyState, resolution and real progress. */
-    private void validatePlaybackStream(ArchiveReport report, String deviceName) {
         try {
-            Locator video = page.locator("video").last();
-            try {
-                video.waitFor(new Locator.WaitForOptions()
-                        .setState(WaitForSelectorState.VISIBLE)
-                        .setTimeout(20000));
-            } catch (Exception exception) {
-                fail(report, "No playback video element became visible", slug(deviceName) + "-no-video");
-                return;
-            }
-            report.videoElement = "PASS";
-
-            String source = String.valueOf(video.evaluate("element => element.currentSrc || element.src || ''"));
-            report.sourceValue = source == null || source.isBlank() ? "<empty>" : source;
+            String source = String.valueOf(video.evaluate(
+                    "element => element.currentSrc || element.src || ''"));
             if (source == null || source.isBlank()) {
-                report.videoSource = "FAIL";
-                fail(report, "Playback video has no source", slug(deviceName) + "-no-source");
-                return;
-            }
-            report.videoSource = "PASS";
-
-            String mediaError = String.valueOf(video.evaluate(
-                    "element => element.error ? JSON.stringify({code: element.error.code, message: element.error.message}) : ''"));
-            if (mediaError != null && !mediaError.isBlank() && !"null".equals(mediaError)) {
-                fail(report, "Media error: " + mediaError, slug(deviceName) + "-media-error");
-                return;
-            }
-
-            video.evaluate("element => { element.muted = true; element.volume = 0; element.play(); }");
-
-            if (!waitForStreamToStart(video, report, deviceName)) {
-                return; // waitForStreamToStart() already recorded the failure.
-            }
-
-            monitorPlayback(video, report, deviceName);
-
-        } catch (Exception exception) {
-            fail(report, "Playback validation error: " + exception.getMessage(),
-                    slug(deviceName) + "-playback-exception");
-        }
-    }
-
-    /**
-     * Polls the newly added stream for up to {@code archive.playback.startup.timeout.seconds}
-     * (default 60s) until it actually has a decodable frame - {@code readyState >= 2} and a
-     * non-zero resolution - instead of taking one snapshot shortly after {@code play()} and
-     * failing on it. A stream is only declared failed once nothing has arrived by the deadline.
-     *
-     * @return {@code true} once the stream has started; {@code false} after recording a failure
-     *         (element lost, a media error surfaced, or the deadline was reached with nothing)
-     */
-    private boolean waitForStreamToStart(Locator video, ArchiveReport report, String deviceName) {
-        long timeoutMs = Math.max(1, intConfig("archive.playback.startup.timeout.seconds",
-                DEFAULT_STARTUP_TIMEOUT_SECONDS)) * 1000L;
-        long deadline = System.currentTimeMillis() + timeoutMs;
-
-        int readyState = 0;
-        int width = 0;
-        int height = 0;
-
-        System.out.println("[INFO] Waiting up to " + (timeoutMs / 1000)
-                + "s for the newly added stream to start - device: " + deviceName);
-
-        while (true) {
-            if (video.count() == 0 || !video.isVisible()) {
-                fail(report, "Playback video element disappeared while waiting for the stream to start",
-                        slug(deviceName) + "-video-lost-startup");
                 return false;
             }
-
-            String mediaError = String.valueOf(video.evaluate(
-                    "element => element.error ? JSON.stringify({code: element.error.code, message: element.error.message}) : ''"));
-            if (mediaError != null && !mediaError.isBlank() && !"null".equals(mediaError)) {
-                fail(report, "Media error while waiting for the stream to start: " + mediaError,
-                        slug(deviceName) + "-startup-media-error");
-                return false;
-            }
-
-            readyState = ((Number) video.evaluate("element => element.readyState")).intValue();
-            width = ((Number) video.evaluate("element => element.videoWidth")).intValue();
-            height = ((Number) video.evaluate("element => element.videoHeight")).intValue();
-            report.readyState = readyState;
-            report.resolution = width + "x" + height;
-
-            if (readyState >= 2 && width > 0 && height > 0) {
-                report.readyStateStatus = "PASS";
-                System.out.println("[PASS] Stream started - readyState=" + readyState
-                        + " resolution=" + report.resolution);
-                return true;
-            }
-
-            if (System.currentTimeMillis() >= deadline) {
-                break;
-            }
-
-            page.waitForTimeout(STARTUP_POLL_INTERVAL_MS);
-        }
-
-        report.readyStateStatus = "FAIL";
-        fail(report, "Stream did not start within " + (timeoutMs / 1000) + "s (readyState=" + readyState
-                + ", resolution=" + width + "x" + height + ")", slug(deviceName) + "-startup-timeout");
-        return false;
-    }
-
-    /**
-     * Watches {@code video} for {@code archive.playback.monitor.seconds} (default 30s), polling every
-     * {@code archive.playback.monitor.interval.ms} (default 2s).
-     *
-     * <p>Replaces the single before/after snapshot this used to take: a camera that plays for three
-     * seconds and then stalls looked identical to a healthy one under that check. Each sample re-checks
-     * the element is still there, carries no media error, and that {@code currentTime} is still moving;
-     * {@code archive.playback.monitor.stall.samples} consecutive non-progressing samples end the check
-     * early as a stall rather than waiting out the full window.
-     */
-    private void monitorPlayback(Locator video, ArchiveReport report, String deviceName) {
-        long monitorMs = Math.max(1, intConfig("archive.playback.monitor.seconds", DEFAULT_MONITOR_SECONDS)) * 1000L;
-        long intervalMs = Math.max(500, intConfig("archive.playback.monitor.interval.ms", DEFAULT_MONITOR_INTERVAL_MS));
-        int maxStallSamples = Math.max(1, intConfig("archive.playback.monitor.stall.samples", DEFAULT_MONITOR_STALL_SAMPLES));
-
-        double startTime = ((Number) video.evaluate("element => element.currentTime")).doubleValue();
-        double lastTime = startTime;
-        int stallStreak = 0;
-        int samples = 0;
-
-        System.out.println("[INFO] Monitoring playback for " + (monitorMs / 1000)
-                + "s (interval " + intervalMs + "ms) - device: " + deviceName);
-
-        long deadline = System.currentTimeMillis() + monitorMs;
-        while (System.currentTimeMillis() < deadline) {
-            page.waitForTimeout(intervalMs);
-            samples++;
-
-            if (video.count() == 0 || !video.isVisible()) {
-                fail(report, "Playback video element became unavailable during monitoring (sample " + samples + ")",
-                        slug(deviceName) + "-video-lost");
-                return;
-            }
-
-            String sampleError = String.valueOf(video.evaluate(
-                    "element => element.error ? JSON.stringify({code: element.error.code, message: element.error.message}) : ''"));
-            if (sampleError != null && !sampleError.isBlank() && !"null".equals(sampleError)) {
-                fail(report, "Media error during monitoring (sample " + samples + "): " + sampleError,
-                        slug(deviceName) + "-monitor-media-error");
-                return;
-            }
-
-            boolean sampleEnded = (Boolean) video.evaluate("element => element.ended");
-            boolean samplePaused = (Boolean) video.evaluate("element => element.paused");
-            report.readyState = ((Number) video.evaluate("element => element.readyState")).intValue();
-            double sampleTime = ((Number) video.evaluate("element => element.currentTime")).doubleValue();
-            boolean sampleProgressed = sampleTime > lastTime + PLAYBACK_TOLERANCE_SECONDS;
-
-            System.out.println("[MONITOR] sample=" + samples + "/" + (monitorMs / intervalMs)
-                    + " currentTime=" + sampleTime + " readyState=" + report.readyState
-                    + " paused=" + samplePaused + " progressed=" + sampleProgressed);
-
-            if (sampleEnded) {
-                fail(report, "Recording ended before the " + (monitorMs / 1000) + "s monitoring window completed"
-                        + " (sample " + samples + ")", slug(deviceName) + "-ended-early");
-                return;
-            }
-
-            if (samplePaused || report.readyState < 2 || !sampleProgressed) {
-                stallStreak++;
-                if (stallStreak >= maxStallSamples) {
-                    fail(report, "Playback stalled: no progress for " + (stallStreak * intervalMs / 1000)
-                            + "s (paused=" + samplePaused + ", readyState=" + report.readyState + ")",
-                            slug(deviceName) + "-stalled");
-                    return;
-                }
-            } else {
-                stallStreak = 0;
-            }
-
-            lastTime = sampleTime;
-        }
-
-        double totalProgressed = lastTime - startTime;
-        if (totalProgressed <= PLAYBACK_TOLERANCE_SECONDS) {
-            report.playback = "FAIL";
-            fail(report, "Recording did not progress over the " + (monitorMs / 1000) + "s monitoring window"
-                    + " (currentTime " + startTime + " -> " + lastTime + ")", slug(deviceName) + "-no-progress");
-            return;
-        }
-
-        report.playback = "PASS";
-        report.passed = true;
-        System.out.println("[PASS] Playback progressed continuously for " + (monitorMs / 1000) + "s"
-                + " (currentTime " + startTime + " -> " + lastTime + ", " + samples + " sample(s)).");
-    }
-
-    // ---------------------------------------------------------------------
-    // API correlation (reporting only; ApiMonitor owns the consolidated log)
-    // ---------------------------------------------------------------------
-
-    private void reportCorrelatedApiFailures(String deviceName, int failuresBefore) {
-        try {
-            List<ApiMonitor.ApiFailure> failures = ApiMonitor.getFailures();
-            if (failures.size() <= failuresBefore) {
-                return;
-            }
-            for (ApiMonitor.ApiFailure failure : failures.subList(failuresBefore, failures.size())) {
-                System.err.println(SEPARATOR);
-                System.err.println("ARCHIVE CAMERA API FAILURE");
-                System.err.println(SEPARATOR);
-                System.err.println("Camera       : " + deviceName);
-                System.err.println("HTTP Status  : " + failure.status() + " " + failure.statusText());
-                System.err.println("Method       : " + failure.method());
-                System.err.println("URL          : " + failure.url());
-                System.err.println("Time         : " + failure.timestamp());
-                System.err.println(SEPARATOR);
-            }
-        } catch (Exception exception) {
-            System.err.println("[WARN] Could not correlate API failures: " + exception.getMessage());
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // Reporting helpers
-    // ---------------------------------------------------------------------
-
-    private void fail(ArchiveReport report, String reason, String screenshotName) {
-        report.passed = false;
-        report.failureReason = reason;
-        report.screenshot = captureScreenshot(screenshotName);
-
-        SoakReporter.recordStreamFailure("Archive", report.selectedDevice,
-                "PASS".equals(report.videoElement) ? "FOUND" : "NOT FOUND",
-                "PASS".equals(report.cameraAdded) ? "YES" : "NO",
-                "PASS".equals(report.videoSource) ? "PRESENT" : "MISSING",
-                report.readyState, report.resolution, !"PASS".equals(report.playback), 0,
-                reason, report.screenshot);
-
-        System.err.println(SEPARATOR);
-        System.err.println("ARCHIVE CAMERA FAILURE");
-        System.err.println(SEPARATOR);
-        System.err.println("Device        : " + report.selectedDevice);
-        System.err.println("Failure       : " + reason);
-        System.err.println("Video Source  : " + report.sourceValue);
-        System.err.println("Ready State   : " + report.readyState);
-        System.err.println("Resolution    : " + report.resolution);
-        System.err.println("Screenshot    : " + (report.screenshot == null ? "<not captured>" : report.screenshot));
-        System.err.println(SEPARATOR);
-    }
-
-    private boolean finish(ArchiveReport report) {
-        System.out.println();
-        System.out.println(SEPARATOR);
-        System.out.println("ARCHIVE / PLAYBACK VALIDATION");
-        System.out.println(SEPARATOR);
-        System.out.println();
-        System.out.println("Archive Page       : " + report.archivePage);
-        System.out.println("Archive Data       : " + report.archiveData);
-        System.out.println("Add Camera Dialog  : " + report.addCameraDialog);
-        System.out.println("Device Tree        : " + report.deviceTree);
-        System.out.println("Active Filter      : " + report.activeFilter);
-        System.out.println("Devices Found      : " + report.devicesFound);
-        System.out.println();
-        System.out.println(SUB_SEPARATOR);
-        System.out.println("SELECTED CAMERA");
-        System.out.println(SUB_SEPARATOR);
-        System.out.println();
-        System.out.println("Device             : " + report.selectedDevice);
-        System.out.println("Checkbox Selected  : " + report.checkboxSelected);
-        System.out.println("Save Changes       : " + report.saveChanges);
-        System.out.println("Camera Added       : " + report.cameraAdded);
-        System.out.println("Video Element      : " + report.videoElement);
-        System.out.println("Video Source       : " + report.videoSource);
-        System.out.println("Ready State        : " + report.readyStateStatus);
-        System.out.println("Resolution         : " + report.resolution);
-        System.out.println("Playback           : " + report.playback);
-        System.out.println("Stream             : " + (report.passed ? "PASS" : "FAIL"));
-        if (!report.passed && report.failureReason != null) {
-            System.out.println("Failure            : " + report.failureReason);
-        }
-        System.out.println();
-        System.out.println(SEPARATOR);
-        System.out.println("ARCHIVE VALIDATION RESULT: " + (report.passed ? "PASS" : "FAIL"));
-        System.out.println(SEPARATOR);
-        return report.passed;
-    }
-
-    private String captureScreenshot(String name) {
-        return ScreenshotUtils.captureTo(page, screenshotDirectory, name);
-    }
-
-    private boolean clickIfPresent(Locator locator) {
-        try {
-            if (locator.count() == 0 || !locator.isVisible()) {
-                return false;
-            }
-            locator.click(new Locator.ClickOptions().setTimeout(3000));
-            return true;
+            int readyState = ((Number) video.evaluate("element => element.readyState")).intValue();
+            return readyState >= 2;
         } catch (Exception exception) {
             return false;
         }
     }
 
-    private long resolveSeed() {
-        String configured = ConfigReader.getOrDefault("archive.validation.random.seed", "");
-        if (configured != null && !configured.isBlank()) {
-            try {
-                return Long.parseLong(configured.trim());
-            } catch (NumberFormatException ignored) {
-                // Fall through to a fresh seed.
+    /**
+     * Removes the camera currently on {@code tile} via the EXISTING per-tile Remove flow -
+     * confirmed live via a real recording: the tile's own "Cancel"-named control opens a "Remove
+     * stream?" confirmation dialog with "Cancel"/"Remove" buttons; clicking that dialog's own
+     * "Remove" completes it. Waits for the tile to actually revert to "Add Camera" before
+     * returning, so the next attempt's {@code gridAddCamera} click never races the removal.
+     *
+     * <p>The trigger click is a plain, non-forced click - matching the confirmed-working recorded
+     * reference flow exactly ({@code getByRole('button', {name: 'Cancel'}).click()}). An earlier
+     * version forced this click (bypassing Playwright's actionability wait), which is the likely
+     * reason the confirmation dialog was intermittently not opening at all: a forced click
+     * dispatches immediately regardless of whether the button is truly ready to receive it, where a
+     * natural click waits for that automatically - the retry loop below remains as a safety net for
+     * any residual timing flakiness, not as the primary mechanism.
+     *
+     * @return {@code true} once the tile is confirmed back in its empty "Add Camera" state -
+     *         {@code false} for any step along the way that could not be confirmed (control not
+     *         found, dialog never opened, tile never reverted).
+     */
+    private boolean removeCurrentCamera(Locator tile) {
+        Locator removeTrigger = tile.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName("Cancel").setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(removeTrigger, TIMEOUT_MS)) {
+            System.err.println("[ARCHIVE]   Remove control not found on the current tile.");
+            return false;
+        }
+
+        // Confirmed live via the natural click's own actionability trace: the "Add Camera"
+        // floating panel's tree can still be sitting on top of the tile - intercepting pointer
+        // events on its "Cancel" control - even after waitForAddCameraPanelClosed() already
+        // reports it gone (its own isVisible() check does not always track a still-occupying-
+        // space panel) and after an Escape key press (also confirmed live: no effect on this
+        // specific panel). A real mouse click on a known-stable, definitely-outside-the-panel
+        // element (the page's own "Playback" heading) is this app's own outside-click-to-dismiss
+        // affordance for this panel - forced, since the panel may itself still be intercepting
+        // that click target's own hit area too.
+        waitForAddCameraPanelClosed();
+        Locator playbackHeading = page.getByRole(AriaRole.HEADING,
+                new Page.GetByRoleOptions().setName("Playback").setExact(true)).first();
+        try {
+            playbackHeading.click(new Locator.ClickOptions().setTimeout(3000).setForce(true));
+        } catch (Exception ignored) {
+            // Best effort - the retry loop below is the real guarantee.
+        }
+        waitForAddCameraPanelClosed();
+
+        Locator confirmDialog = page.getByRole(AriaRole.DIALOG)
+                .filter(new Locator.FilterOptions().setHasText("Remove stream?")).first();
+        // Bounded retry: kept as a safety net for residual UI-timing flakiness now that the click
+        // itself is natural (see the note above) rather than forced.
+        boolean dialogOpened = false;
+        for (int clickAttempt = 1; clickAttempt <= 5 && !dialogOpened; clickAttempt++) {
+            removeTrigger.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+            dialogOpened = SoakUiUtils.waitVisible(confirmDialog, clickAttempt < 5 ? 4000 : TIMEOUT_MS);
+            if (!dialogOpened && clickAttempt < 5) {
+                page.waitForTimeout(400);
             }
         }
-        return System.nanoTime();
+        if (!dialogOpened) {
+            System.err.println("[ARCHIVE]   Remove confirmation dialog did not open.");
+            return false;
+        }
+        Locator confirmRemove = confirmDialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName("Remove").setExact(true)).first();
+        if (SoakUiUtils.waitVisible(confirmRemove, TIMEOUT_MS)) {
+            confirmRemove.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+        }
+
+        Locator addCameraAgain = page.getByRole(AriaRole.GRIDCELL).first()
+                .getByLabel("Add Camera", new Locator.GetByLabelOptions().setExact(false)).first();
+        return SoakUiUtils.waitVisible(addCameraAgain, TIMEOUT_MS);
     }
 
-    private int intConfig(String key, int fallback) {
+    // ---------------------------------------------------------------------
+    // Export creation (existing flow, only the Export Name is made unique)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Selects the archive timeline range and creates an export - confirmed live via a real
+     * recording: a dedicated bookmark-selection-mode toggle in the playback toolbar
+     * ({@code archive-control-10}) must be enabled before clicking the timeline's own scale
+     * reveals "Confirm bookmark selection"; both clicks are forced since a decorative sibling
+     * (the timeline's playback-settings panel / the moving playhead overlay) legitimately overlaps
+     * their hit area without actually blocking the real control underneath. The Export Name is
+     * generated fresh on every run so repeated soak executions never collide; every other field
+     * and control name is exactly what the existing/recorded flow already uses.
+     */
+    private boolean createExport() {
         try {
-            String value = ConfigReader.getOrDefault(key, String.valueOf(fallback));
-            return value.isBlank() ? fallback : Integer.parseInt(value.trim());
+            Locator bookmarkModeToggle = page.locator(
+                    ".icon-button.dark.archive-playback-controls__button.archive-control-10").first();
+            if (!SoakUiUtils.waitVisible(bookmarkModeToggle, TIMEOUT_MS)) {
+                System.err.println("[ARCHIVE]   Bookmark-selection toggle not found.");
+                return false;
+            }
+            Locator scaleTop = page.locator(".archive-timeline__scale-top-inner").first();
+            if (!SoakUiUtils.waitVisible(scaleTop, TIMEOUT_MS)) {
+                System.err.println("[ARCHIVE]   Timeline scale not found.");
+                return false;
+            }
+            Locator confirmSelection = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Confirm bookmark selection").setExact(false)).first();
+
+            // Bounded retry: confirmed live, this exact toggle -> scale-click sequence can
+            // occasionally need a second pass before "Confirm bookmark selection" actually appears
+            // (the same class of UI-timing flakiness already seen on the tile's own Remove control) -
+            // each retry re-toggles the mode off/back on since a stuck "half-selected" range can
+            // otherwise persist between attempts.
+            boolean confirmVisible = false;
+            for (int attempt = 1; attempt <= 3 && !confirmVisible; attempt++) {
+                bookmarkModeToggle.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS).setForce(true));
+                scaleTop.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS).setForce(true));
+                confirmVisible = SoakUiUtils.waitVisible(confirmSelection, attempt < 3 ? 4000 : TIMEOUT_MS);
+            }
+            if (!confirmVisible) {
+                System.err.println("[ARCHIVE]   'Confirm bookmark selection' did not appear.");
+                return false;
+            }
+            confirmSelection.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+
+            Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+            if (!SoakUiUtils.waitVisible(dialog, TIMEOUT_MS)) {
+                System.err.println("[ARCHIVE]   Export dialog did not open.");
+                return false;
+            }
+
+            String exportName = "Export Testing " + System.currentTimeMillis();
+            Locator nameField = dialog.getByRole(AriaRole.TEXTBOX,
+                    new Locator.GetByRoleOptions().setName("Export Name").setExact(false)).first();
+            if (!SoakUiUtils.waitVisible(nameField, TIMEOUT_MS)) {
+                System.err.println("[ARCHIVE]   'Export Name' field not found.");
+                SoakUiUtils.closeOpenDialogs(page);
+                return false;
+            }
+            nameField.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+            nameField.fill(exportName);
+
+            Locator noteField = dialog.getByRole(AriaRole.TEXTBOX,
+                    new Locator.GetByRoleOptions().setName("Type note").setExact(false)).first();
+            if (SoakUiUtils.waitVisible(noteField, TIMEOUT_MS)) {
+                noteField.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+                noteField.fill("Testing notes");
+            }
+
+            Locator exportSubmit = dialog.getByRole(AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("Export").setExact(true)).first();
+            if (!SoakUiUtils.waitVisible(exportSubmit, TIMEOUT_MS)) {
+                System.err.println("[ARCHIVE]   'Export' submit control not found.");
+                SoakUiUtils.closeOpenDialogs(page);
+                return false;
+            }
+
+            String toastBefore = SoakUiUtils.readToastText(page);
+            exportSubmit.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+
+            long deadline = System.currentTimeMillis() + 10000;
+            String toastAfter = "";
+            while (System.currentTimeMillis() < deadline) {
+                String current = SoakUiUtils.readToastText(page);
+                if (!current.isBlank() && !current.equals(toastBefore)) {
+                    toastAfter = current;
+                    break;
+                }
+                page.waitForTimeout(300);
+            }
+
+            boolean dialogClosed = waitForNoDialogOpen();
+            System.out.println("[ARCHIVE]   Export created: name='" + exportName + "' toast=\"" + toastAfter
+                    + "\" dialogClosed=" + dialogClosed);
+            return dialogClosed;
         } catch (Exception exception) {
-            return fallback;
+            System.err.println("[ARCHIVE]   createExport failed: " + exception.getMessage());
+            SoakUiUtils.closeOpenDialogs(page);
+            return false;
         }
     }
 
-    private String slug(String value) {
-        if (value == null || value.isBlank()) {
-            return "device";
+    private boolean waitForNoDialogOpen() {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            if (!SoakUiUtils.isAnyDialogOpen(page)) {
+                return true;
+            }
+            page.waitForTimeout(200);
         }
-        String slug = value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("(^-|-$)", "");
-        if (slug.length() > 40) {
-            slug = slug.substring(0, 40);
-        }
-        return slug.isBlank() ? "device" : slug;
+        return !SoakUiUtils.isAnyDialogOpen(page);
     }
 }

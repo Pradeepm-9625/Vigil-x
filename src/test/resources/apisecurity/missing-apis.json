@@ -747,5 +747,35 @@
     "normalizedPath" : "/export/{id}",
     "authObservedInSample" : null,
     "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService against OWSAP automation-Final.har on 2026-08-22 (run-20260822-162220)"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/health",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/health",
+    "authObservedInSample" : null,
+    "sampleRequestBody" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService on 2026-09-17"
+  }, {
+    "method" : "GET",
+    "host" : "192.168.1.145:3000",
+    "path" : "/license",
+    "query" : "",
+    "expectedStatus" : 200,
+    "normalizedPath" : "/license",
+    "authObservedInSample" : null,
+    "sampleRequestBody" : null,
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService on 2026-09-17"
+  }, {
+    "method" : "POST",
+    "host" : "192.168.1.145:3000",
+    "path" : "/auth/admin-register/online",
+    "query" : "",
+    "expectedStatus" : 201,
+    "normalizedPath" : "/auth/admin-register/online",
+    "authObservedInSample" : null,
+    "sampleRequestBody" : "{\"email\":\"pradeep.m+1@solutionchamps.com\"}",
+    "reason" : "Confirmed missing from ApiMonitor capture by ApiComparisonService on 2026-09-17"
   } ]
 }
