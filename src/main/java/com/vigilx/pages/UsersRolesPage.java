@@ -6,6 +6,7 @@ import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
+import com.microsoft.playwright.FileChooser;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Response;
@@ -237,9 +238,26 @@ public class UsersRolesPage extends BasePage {
             return false;
         }
         try {
-            addPicture.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-            Locator fileInput = page.locator("input[type=\"file\"]").first();
-            fileInput.setInputFiles(resolved);
+            FileChooser chooser = null;
+            try {
+                chooser = page.waitForFileChooser(new Page.WaitForFileChooserOptions().setTimeout(5000),
+                        () -> addPicture.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS)));
+            } catch (Exception noChooser) {
+                if (!SoakUiUtils.isVisibleQuietly(page.locator("input[type=\"file\"]").first())) {
+                    addPicture.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                }
+            }
+            if (chooser != null) {
+                chooser.setFiles(resolved);
+            } else {
+                Locator fileInput = page.locator("input[type=\"file\"]").first();
+                if (fileInput.count() == 0) {
+                    System.err.println("[USERS & ROLES]   Profile picture file input not found.");
+                    cancelCropper();
+                    return false;
+                }
+                fileInput.setInputFiles(resolved);
+            }
             page.waitForTimeout(1200);
 
             // Recorded flow uses a plain <button> text filter here - the cropper's confirm button's

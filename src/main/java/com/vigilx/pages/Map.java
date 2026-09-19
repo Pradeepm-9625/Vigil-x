@@ -28,7 +28,9 @@ public class Map extends BasePage {
 
     try {
 
-        Files.createDirectories(soakScreenshotDir);
+        // Deliberately NOT created here: the screenshots folder must only appear when a real
+        // failure screenshot is actually captured (see captureMapScreenshot below, which already
+        // creates it lazily at that exact moment), never for a run where Map validation passes.
 
         System.out.println("=================================================");
         System.out.println("MAP VALIDATION STARTED");

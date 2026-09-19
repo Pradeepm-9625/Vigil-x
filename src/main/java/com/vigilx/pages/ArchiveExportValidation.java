@@ -30,6 +30,10 @@ import com.vigilx.utils.SoakUiUtils;
 public class ArchiveExportValidation extends BasePage {
 
     private static final int TIMEOUT_MS = 15000;
+    /** Per the Export Download flow requirement: check at most this many export records before
+     *  giving up - a still-processing or failed record is skipped, never counted as the final
+     *  failure on its own. */
+    private static final int MAX_DOWNLOAD_RECORD_ATTEMPTS = 5;
     private static final Path DOWNLOAD_DIRECTORY = Paths.get(
             ConfigReader.getOrDefault("archive.export.download.directory",
                     "target/soak-test/downloads/archive-export"));
@@ -63,27 +67,10 @@ public class ArchiveExportValidation extends BasePage {
             }
             exportsTab.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
 
-            Locator previewControl = firstExportPreviewControl();
-            if (previewControl == null) {
-                fail("No export record was available to select");
-                return false;
-            }
-            previewControl.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
-
-            if (!validatePreview()) {
-                fail("Export preview/video did not become visible");
-                return false;
-            }
-
-            Download download = downloadExport();
-            if (download == null) {
-                fail("Export download did not complete");
-                return false;
-            }
-
-            Path saved = verifyDownloadedFile(download);
+            Path saved = downloadFirstAvailableExport();
             if (saved == null) {
-                fail("Downloaded export file is missing, empty, or has no valid extension");
+                fail("None of the checked export records (up to " + MAX_DOWNLOAD_RECORD_ATTEMPTS
+                        + ") could be downloaded");
                 return false;
             }
             System.out.println("[ARCHIVE EXPORT]   Download verified | file=" + saved);
@@ -316,6 +303,126 @@ public class ArchiveExportValidation extends BasePage {
     private Locator firstExportPreviewControl() {
         Locator row = firstExportRow();
         return row == null ? null : rowControl(row, "preview");
+    }
+
+    /**
+     * Downloads the first export record - of up to {@link #MAX_DOWNLOAD_RECORD_ATTEMPTS} checked,
+     * in table order - that is actually ready to download, per the Export Download flow
+     * requirement: a still-processing record (no "download" control yet) or a failed one (has its
+     * own "Retry" control) is skipped rather than treated as this flow's own failure. Retry is
+     * clicked once, best-effort, on a failed record - never retried again within this same pass -
+     * then the next record is tried. Stops and returns as soon as one record downloads
+     * successfully; only when none of the checked records could be downloaded does this return
+     * {@code null}, the one real failure case. On success the record's own Preview dialog is left
+     * OPEN, matching this method's previous single-record contract (the caller closes it before
+     * moving on); every skipped/failed record's dialog, if one was opened at all, is closed again
+     * before moving to the next record.
+     */
+    private Path downloadFirstAvailableExport() {
+        // Confirmed live: the export table can still be rendering right after the "Exports" tab
+        // click, so an immediate row scan can see zero rows - bounded wait for the first real
+        // record before starting the attempt loop below, never a blind scan.
+        long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+        while (exportRowAt(0) == null && System.currentTimeMillis() < deadline) {
+            page.waitForTimeout(300);
+        }
+
+        for (int attempt = 0; attempt < MAX_DOWNLOAD_RECORD_ATTEMPTS; attempt++) {
+            Locator row = exportRowAt(attempt);
+            if (row == null) {
+                System.out.println("[ARCHIVE EXPORT]   No export record at position " + (attempt + 1)
+                        + "; stopping after " + attempt + " checked.");
+                break;
+            }
+
+            Locator retryControl = rowControl(row, "retry");
+            if (retryControl.count() > 0) {
+                System.out.println("[ARCHIVE EXPORT]   Record " + (attempt + 1) + " needs a retry; "
+                        + "clicking Retry once and moving to the next record (not retried again this pass).");
+                try {
+                    retryControl.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+                } catch (Exception exception) {
+                    System.err.println("[ARCHIVE EXPORT]   Retry click failed for record " + (attempt + 1)
+                            + ": " + SoakUiUtils.firstLine(exception.getMessage()));
+                }
+                continue;
+            }
+
+            if (rowControl(row, "download").count() == 0) {
+                System.out.println("[ARCHIVE EXPORT]   Record " + (attempt + 1)
+                        + " is still processing; skipping to the next record.");
+                continue;
+            }
+
+            Locator previewControl = rowControl(row, "preview");
+            if (previewControl.count() == 0) {
+                continue;
+            }
+            try {
+                previewControl.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+                if (!validatePreview()) {
+                    System.out.println("[ARCHIVE EXPORT]   Record " + (attempt + 1)
+                            + "'s preview/video did not become visible; skipping to the next record.");
+                    closeOpenDialog("Skip record " + (attempt + 1));
+                    continue;
+                }
+
+                Download download = downloadExport();
+                if (download == null) {
+                    System.out.println("[ARCHIVE EXPORT]   Record " + (attempt + 1)
+                            + "'s download did not complete; skipping to the next record.");
+                    closeOpenDialog("Skip record " + (attempt + 1));
+                    continue;
+                }
+
+                Path saved = verifyDownloadedFile(download);
+                if (saved == null) {
+                    System.out.println("[ARCHIVE EXPORT]   Record " + (attempt + 1)
+                            + "'s downloaded file was missing/empty/invalid; skipping to the next record.");
+                    closeOpenDialog("Skip record " + (attempt + 1));
+                    continue;
+                }
+
+                System.out.println("[ARCHIVE EXPORT]   Record " + (attempt + 1) + " downloaded "
+                        + "successfully - stopping here, remaining checks not needed.");
+                return saved;
+            } catch (Exception exception) {
+                System.err.println("[ARCHIVE EXPORT]   Record " + (attempt + 1) + " attempt failed: "
+                        + SoakUiUtils.firstLine(exception.getMessage()));
+                closeOpenDialog("Skip record " + (attempt + 1));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The export row at {@code index} (0-based) among rows that own a "Preview" control - the same
+     * membership test {@link #firstExportRow()} uses, so "header row or empty state" is still never
+     * matched. Re-queried fresh on every call (never a cached list) so a prior Retry click's
+     * re-render - or a record's status changing between attempts - is always reflected.
+     */
+    private Locator exportRowAt(int index) {
+        Locator rows = page.getByRole(AriaRole.ROW);
+        int count = rows.count();
+        int seen = -1;
+        for (int i = 0; i < count; i++) {
+            Locator row = rows.nth(i);
+            try {
+                if (!row.isVisible()) {
+                    continue;
+                }
+            } catch (Exception ignored) {
+                continue;
+            }
+            if (rowControl(row, "preview").count() == 0) {
+                continue;
+            }
+            seen++;
+            if (seen == index) {
+                return row;
+            }
+        }
+        return null;
     }
 
     /** The first available export row's own "Logs" control. */

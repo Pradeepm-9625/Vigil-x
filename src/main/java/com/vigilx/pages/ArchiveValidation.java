@@ -1,6 +1,9 @@
 package com.vigilx.pages;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -50,11 +53,16 @@ public class ArchiveValidation extends BasePage {
      */
     public boolean validateArchive(String baseUrl) {
         try {
-            navigateTo(baseUrl + "/live-views/archive");
+            // Strip a trailing slash before appending the path - base.url is configured with one
+            // ("http://host:port/"), and concatenating without stripping it produces a double slash
+            // ("http://host:port//live-views/archive") that was found live to 404 on this route.
+            String normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+            navigateTo(normalizedBaseUrl + "/live-views/archive");
             waitForPlaybackHeading();
 
             Set<String> attemptedCameras = new LinkedHashSet<>();
             boolean recordingFound = false;
+            boolean exportCreated = false;
 
             for (int attempt = 1; attempt <= MAX_CAMERA_ATTEMPTS; attempt++) {
                 // Confirmed live (matches the recorded reference flow exactly): unlike Live View's
@@ -94,6 +102,24 @@ public class ArchiveValidation extends BasePage {
                 Locator saveChanges = page.getByRole(AriaRole.BUTTON,
                         new Page.GetByRoleOptions().setName("Save changes").setExact(false)).first();
                 saveChanges.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+
+                // Confirmed live: "Save changes" alone does not always close the Add Cameras panel,
+                // which then keeps occupying screen space and intercepting pointer events on the
+                // tile's own controls right afterward - the exact flakiness removeCurrentCamera's
+                // own outside-click-on-the-Playback-heading workaround exists for. Close it via its
+                // own real, named control first, before falling back to just waiting for it to
+                // disappear on its own - never failing this attempt if the control is not present
+                // (a build/state where the panel already auto-closes should not be penalised).
+                Locator closeAddCameras = page.getByRole(AriaRole.BUTTON,
+                        new Page.GetByRoleOptions().setName("Close add cameras").setExact(false)).first();
+                if (SoakUiUtils.waitVisible(closeAddCameras, 3000)) {
+                    try {
+                        closeAddCameras.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+                    } catch (Exception exception) {
+                        System.err.println("[ARCHIVE]   'Close add cameras' click failed: "
+                                + exception.getMessage());
+                    }
+                }
                 waitForAddCameraPanelClosed();
 
                 Locator tile = page.getByRole(AriaRole.GRIDCELL,
@@ -112,6 +138,20 @@ public class ArchiveValidation extends BasePage {
                 if (hasAvailableRecording()) {
                     System.out.println("[ARCHIVE]   Recording/stream available for '" + cameraName + "'.");
                     recordingFound = true;
+                    // Export, immediately after stream validation succeeds - never before it, and
+                    // never gated behind any extra wait beyond what createExport() itself already
+                    // needs (its own condition-based waits for the toggle, the timeline, and the
+                    // "Confirm bookmark selection" control). A failed export is recorded, not
+                    // thrown, and never stops this method from returning cleanly: the caller's
+                    // existing Search -> Bookmark -> Exports -> Snapshots sequence still runs
+                    // afterward regardless of this outcome, exactly as before this call existed -
+                    // every one of those is its own independent validatePage() call in
+                    // SoakHealthCheckRunner, never gated on this method's result.
+                    exportCreated = createExport();
+                    if (!exportCreated) {
+                        System.err.println("[ARCHIVE]   Export creation failed after a successful "
+                                + "stream validation.");
+                    }
                     break;
                 }
 
@@ -133,7 +173,7 @@ public class ArchiveValidation extends BasePage {
                 return false;
             }
 
-            return true;
+            return exportCreated;
         } catch (Exception exception) {
             System.err.println("[ARCHIVE] Archive/Playback flow failed: " + exception.getMessage());
             return false;
@@ -207,15 +247,21 @@ public class ArchiveValidation extends BasePage {
     // ---------------------------------------------------------------------
 
     /**
-     * Expands the device tree just enough to reveal camera rows, then picks the first available
+     * Expands the device tree just enough to reveal camera rows, then picks a RANDOM available
      * active camera NOT already in {@code attemptedCameras} - a real camera row (identified the
      * same way the tree itself labels it, "Device is online ..."), never a site/folder row, a
-     * hard-coded name, or a fixed positional index reused blindly across attempts. Each row's own
-     * {@code textContent()} is its identifier (confirmed live: {@code aria-label} is {@code null}
-     * on every row in this build, and the tree's checkbox-checked state does NOT persist across
-     * Add-Camera panel open/close cycles - confirmed live by re-opening the panel after saving a
-     * checked camera and finding it unchecked again - so checkbox state can never be used to tell
-     * "already attempted" apart from "not yet tried"; only this explicit set can).
+     * hard-coded name, or a fixed positional index. Each row's own {@code textContent()} is its
+     * identifier (confirmed live: {@code aria-label} is {@code null} on every row in this build,
+     * and the tree's checkbox-checked state does NOT persist across Add-Camera panel open/close
+     * cycles - confirmed live by re-opening the panel after saving a checked camera and finding it
+     * unchecked again - so checkbox state can never be used to tell "already attempted" apart from
+     * "not yet tried"; only this explicit set can).
+     *
+     * <p>The candidate order is shuffled fresh on every call - this is the only change from the
+     * previous behavior (which always tried tree-order index 0 first): the existing retry loop in
+     * {@link #validateArchive(String)} (attempted-camera tracking, remove-on-no-recording,
+     * {@link #MAX_CAMERA_ATTEMPTS} cap) is untouched, since it only ever calls this method and reads
+     * its return value exactly as before.
      *
      * @return the selected camera's own name (its row's trimmed text), or {@code null} if every
      *         available candidate has already been attempted
@@ -246,7 +292,13 @@ public class ArchiveValidation extends BasePage {
         }
 
         int total = deviceItems.count();
+        List<Integer> candidateOrder = new ArrayList<>();
         for (int index = 0; index < total; index++) {
+            candidateOrder.add(index);
+        }
+        Collections.shuffle(candidateOrder);
+
+        for (int index : candidateOrder) {
             Locator device = deviceItems.nth(index);
             String name;
             try {
@@ -382,6 +434,23 @@ public class ArchiveValidation extends BasePage {
         return SoakUiUtils.waitVisible(addCameraAgain, TIMEOUT_MS);
     }
 
+    /**
+     * Clicks a named toolbar button ("Collapse timeline"/"Expand timeline") if it is currently
+     * present - best-effort only: neither control is guaranteed present in every timeline state, so
+     * a missing one is not a failure, just nothing to do.
+     */
+    private void clickToolbarButtonIfPresent(String name) {
+        try {
+            Locator button = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName(name).setExact(true)).first();
+            if (SoakUiUtils.waitVisible(button, 3000)) {
+                button.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+            }
+        } catch (Exception exception) {
+            System.err.println("[ARCHIVE]   '" + name + "' click failed: " + exception.getMessage());
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Export creation (existing flow, only the Export Name is made unique)
     // ---------------------------------------------------------------------
@@ -398,13 +467,41 @@ public class ArchiveValidation extends BasePage {
      */
     private boolean createExport() {
         try {
+            // The Add Cameras panel can still be visually open at this point - confirmed live via
+            // screenshot: its own "Close add cameras" click and waitForAddCameraPanelClosed() can
+            // both report the panel gone while it visually still covers the entire playback
+            // toolbar, so every click below would land on/through it instead of the real controls
+            // underneath (exactly why the toggle never actually changed the app's live footer -
+            // "Confirm bookmark selection" was consistently unreachable). This is the same class of
+            // lingering-panel problem removeCurrentCamera() already has a proven fix for - reusing
+            // that exact same outside-click-on-the-"Playback"-heading dismiss here, once, before
+            // touching the toolbar.
+            Locator playbackHeading = page.getByRole(AriaRole.HEADING,
+                    new Page.GetByRoleOptions().setName("Playback").setExact(true)).first();
+            try {
+                playbackHeading.click(new Locator.ClickOptions().setTimeout(3000).setForce(true));
+            } catch (Exception ignored) {
+                // Best effort - the toggle/ruler waits below are the real guarantee.
+            }
+            waitForAddCameraPanelClosed();
+
+            // Confirmed live: this toggle now only renders while the timeline is EXPANDED (the
+            // opposite of an earlier build, where it showed on the default/collapsed state) -
+            // expand first, best-effort, before the initial visibility check below, so that check
+            // is not evaluated against the wrong (collapsed, button-absent) state.
+            clickToolbarButtonIfPresent("Expand timeline");
+
             Locator bookmarkModeToggle = page.locator(
                     ".icon-button.dark.archive-playback-controls__button.archive-control-10").first();
             if (!SoakUiUtils.waitVisible(bookmarkModeToggle, TIMEOUT_MS)) {
                 System.err.println("[ARCHIVE]   Bookmark-selection toggle not found.");
                 return false;
             }
-            Locator scaleTop = page.locator(".archive-timeline__scale-top-inner").first();
+            // Confirmed via a fresh real recording: the actually-clickable timeline element is the
+            // ruler itself (.archive-timeline__scale-ruler), not its outer wrapper
+            // (.archive-timeline__scale-top-inner) the previous version of this method clicked -
+            // clicking the wrapper does not reliably reveal "Confirm bookmark selection".
+            Locator scaleTop = page.locator(".archive-timeline__scale-ruler").first();
             if (!SoakUiUtils.waitVisible(scaleTop, TIMEOUT_MS)) {
                 System.err.println("[ARCHIVE]   Timeline scale not found.");
                 return false;
@@ -412,13 +509,17 @@ public class ArchiveValidation extends BasePage {
             Locator confirmSelection = page.getByRole(AriaRole.BUTTON,
                     new Page.GetByRoleOptions().setName("Confirm bookmark selection").setExact(false)).first();
 
-            // Bounded retry: confirmed live, this exact toggle -> scale-click sequence can
-            // occasionally need a second pass before "Confirm bookmark selection" actually appears
-            // (the same class of UI-timing flakiness already seen on the tile's own Remove control) -
-            // each retry re-toggles the mode off/back on since a stuck "half-selected" range can
-            // otherwise persist between attempts.
+            // Bounded retry: confirmed live, this exact sequence can occasionally need a second pass
+            // before "Confirm bookmark selection" actually appears (the same class of UI-timing
+            // flakiness already seen on the tile's own Remove control). Confirmed live: the toggle
+            // now only exists while the timeline is EXPANDED (the opposite of an earlier build) - so
+            // each attempt expands first, THEN clicks the toggle, instead of the previous
+            // collapse-then-click-then-expand order which would hide the button right before
+            // clicking it. Collapsing/expanding are both best-effort (their own controls are not
+            // always present/needed, so a missing one never fails this attempt).
             boolean confirmVisible = false;
             for (int attempt = 1; attempt <= 3 && !confirmVisible; attempt++) {
+                clickToolbarButtonIfPresent("Expand timeline");
                 bookmarkModeToggle.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS).setForce(true));
                 scaleTop.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS).setForce(true));
                 confirmVisible = SoakUiUtils.waitVisible(confirmSelection, attempt < 3 ? 4000 : TIMEOUT_MS);
@@ -473,6 +574,21 @@ public class ArchiveValidation extends BasePage {
                     break;
                 }
                 page.waitForTimeout(300);
+            }
+
+            // Dismiss the success/result toast so it can never linger over the next existing step
+            // (Search -> Bookmark -> Exports -> Snapshots) - the same stable, id-prefix toast
+            // locator SoakUiUtils.readToastText() already uses, never the exact generated
+            // "#common-toast-11"-style id from one specific capture, which is not guaranteed to be
+            // the same number on a different run. Best-effort: a toast that already auto-dismissed,
+            // or a dismiss click that does not land, never fails an export that already succeeded.
+            try {
+                Locator toast = page.locator("[id^='common-toast'], [class*='toast' i], [role='alert']").first();
+                if (SoakUiUtils.isVisibleQuietly(toast)) {
+                    toast.click(new Locator.ClickOptions().setTimeout(3000));
+                }
+            } catch (Exception ignored) {
+                // Best effort only - see the note above.
             }
 
             boolean dialogClosed = waitForNoDialogOpen();
