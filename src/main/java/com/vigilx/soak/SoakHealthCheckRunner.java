@@ -17,6 +17,7 @@ import com.vigilx.factory.PlaywrightFactory;
 import com.vigilx.monitoring.ApiMonitor;
 import com.vigilx.monitoring.LiveViewMonitor;
 import com.vigilx.monitoring.PageApiTracker;
+import com.vigilx.apisecurity.performance.SoakApiJmxGenerator;
 import com.vigilx.pages.ApplicationHealthPage;
 import com.vigilx.pages.ApplicationSettingsPage;
 import com.vigilx.pages.ArchiveExportValidation;
@@ -670,6 +671,14 @@ public final class SoakHealthCheckRunner {
                 // and rewrites the multi-run report. Never affects pass/fail or any flow above.
                 SoakConsolidatedReportGenerator.generate();
                 LOG.info("[SOAK REPORT] Consolidated report updated");
+            } catch (Exception ignored) { }
+            try {
+                // One JMX per soak run, containing every API this run's own ApiMonitor capture
+                // actually observed (never skipped, never the separate load-test HAR/registry
+                // inventory) - additive only, caught here exactly like every other reporting step
+                // above so a JMX-generation problem can never affect this run's own result.
+                SoakApiJmxGenerator.generate(SoakRunContext.current().runDirectory(),
+                        "VigilX SoakTest All APIs " + result.executionId);
             } catch (Exception ignored) { }
             PlaywrightFactory.closeBrowser();
         }

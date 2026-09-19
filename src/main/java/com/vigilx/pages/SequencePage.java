@@ -26,7 +26,12 @@ import com.vigilx.utils.SoakUiUtils;
  */
 public class SequencePage extends BasePage {
 
-    private static final int ELEMENT_TIMEOUT_MS = 1000;
+    // Matches LiveViewCrudPage's own already-proven-live value: right after navigating to this
+    // client-rendered SPA area, its nav buttons ("Cameras", "Sequence") need real render time, not
+    // just DOM-content-loaded - a shorter timeout here was found live to time out before they
+    // appear, making navigateToSequence() (and therefore the whole create/update/delete flow) fail
+    // before it ever reaches a real UI interaction.
+    private static final int ELEMENT_TIMEOUT_MS = 10000;
 
     public SequencePage(Page page) {
         super(page);
@@ -174,16 +179,22 @@ public class SequencePage extends BasePage {
 
             boolean fieldOk = fillSequenceName(sequenceName);
 
+            Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+
+            // Confirmed live via a screenshot of the real dialog: there is no separate "Add Camera"
+            // trigger to open - the "Add Cameras" panel and its tree are already visible as soon as
+            // the dialog opens; only the tree itself needs expanding (handled in
+            // selectTwoRandomCameras below).
+            //
             // Confirmed live via a real recording: a sequence needs at least two cameras - the
             // dialog's tree-selection panel and its final submit are two DISTINCT stages, not one
             // control. Checking camera(s), then clicking the panel's own "Add Cameras" button,
             // commits them into "Selected Cameras"; only after that commit does the dialog's real
-            // submit control - "Add Sequence" (exact) - actually create anything. Clicking only
-            // "Add Cameras" (as an earlier version of this method mistakenly treated as the final
-            // submit) is a silent no-op: no API call, no toast, dialog stays open.
+            // submit control actually create anything. Clicking only "Add Cameras" (as an earlier
+            // version of this method mistakenly treated as the final submit) is a silent no-op: no
+            // API call, no toast, dialog stays open.
             boolean camerasOk = selectTwoRandomCameras(cameraPaths);
 
-            Locator dialog = page.getByRole(AriaRole.DIALOG).first();
             Locator commitCameras = dialog.getByRole(AriaRole.BUTTON,
                     new Locator.GetByRoleOptions().setName("Add Cameras").setExact(true)).first();
             if (SoakUiUtils.waitVisible(commitCameras, ELEMENT_TIMEOUT_MS)) {
@@ -198,12 +209,13 @@ public class SequencePage extends BasePage {
                         + " to final submit anyway.");
             }
 
-            // The real submit - scoped to the dialog, exact match so it is never confused with the
-            // "Add Cameras" commit button above.
-            Locator submit = dialog.getByRole(AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Add Sequence").setExact(true)).first();
+            // The real submit - scoped to the dialog. Matches either "Add Sequence" (previously
+            // confirmed live in this build) or "Save" (reported as the current label) - whichever
+            // this build actually shows, without assuming one over the other.
+            Locator submit = dialog.getByRole(AriaRole.BUTTON, new Locator.GetByRoleOptions()
+                    .setName(Pattern.compile("^(Add Sequence|Save)$"))).first();
             if (!SoakUiUtils.waitVisible(submit, ELEMENT_TIMEOUT_MS)) {
-                System.err.println("[SEQUENCE]   Dialog's 'Add Sequence' submit control not found.");
+                System.err.println("[SEQUENCE]   Dialog's submit control ('Add Sequence'/'Save') not found.");
                 SoakUiUtils.closeOpenDialogs(page);
                 return false;
             }
@@ -226,18 +238,19 @@ public class SequencePage extends BasePage {
         }
     }
 
-    /** Expands the configured tree branch and selects two distinct online cameras at random. */
+    /**
+     * Selects two distinct online cameras at random. {@code cameraPaths} (a configured, hard-coded
+     * project/site/node path) is deliberately no longer used to drive tree expansion - confirmed
+     * live that this real tree's structure had drifted from that static config (an unrelated,
+     * pre-existing JMeter run had renamed a node), which made the hard-coded walk find nothing.
+     * Expansion is now the same generic, stable-attribute walk ({@code aria-expanded="false"} under
+     * {@code #mui-tree-view-...}) already proven in {@link LiveViewCrudPage#expandDeviceTree()} and
+     * {@link ArchiveValidation} - never a fixed path, so it cannot go stale the same way again. The
+     * parameter is kept only for call-site/signature compatibility.
+     */
     private boolean selectTwoRandomCameras(String[][] cameraPaths) {
         try {
-            if (cameraPaths != null && cameraPaths.length > 0) {
-                String[] firstPath = cameraPaths[0];
-                for (int index = 0; index < firstPath.length - 1; index++) {
-                    Locator node = treeItem(firstPath[index]);
-                    if (SoakUiUtils.isVisibleQuietly(node)) {
-                        node.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                    }
-                }
-            }
+            expandDeviceTree();
 
             Pattern onlineDevice = Pattern.compile("device is online", Pattern.CASE_INSENSITIVE);
             Locator deviceItems = page.getByRole(AriaRole.TREEITEM,
@@ -267,6 +280,35 @@ public class SequencePage extends BasePage {
             System.err.println("[SEQUENCE]   Random camera selection failed: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
             return false;
+        }
+    }
+
+    /**
+     * Reveals nested camera rows by expanding collapsed tree nodes - a generic, stable-attribute
+     * walk ({@code aria-expanded="false"}), never a hard-coded project/site path - until at least
+     * one online device row is visible. Same proven pattern as
+     * {@code LiveViewCrudPage.expandDeviceTree()}; kept as this class's own copy per the existing
+     * per-class convention. Bounded so a genuinely empty/offline-only tree does not loop forever.
+     */
+    private void expandDeviceTree() {
+        Pattern onlineDevice = Pattern.compile("device is online", Pattern.CASE_INSENSITIVE);
+        Locator deviceItems = page.getByRole(AriaRole.TREEITEM, new Page.GetByRoleOptions().setName(onlineDevice));
+        for (int attempt = 0; attempt < 5 && deviceItems.count() == 0; attempt++) {
+            Locator expanders = page.locator("[id*='mui-tree-view'] [aria-expanded='false']");
+            int count = expanders.count();
+            if (count == 0) {
+                break;
+            }
+            for (int index = 0; index < count; index++) {
+                try {
+                    Locator expander = expanders.nth(index);
+                    if (expander.isVisible()) {
+                        expander.click(new Locator.ClickOptions().setTimeout(3000));
+                    }
+                } catch (Exception ignored) {
+                    // Row may already be expanded or detached mid-loop; try the next one.
+                }
+            }
         }
     }
 

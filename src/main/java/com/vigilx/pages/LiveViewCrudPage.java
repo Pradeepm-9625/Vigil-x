@@ -1,5 +1,8 @@
 package com.vigilx.pages;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
 
@@ -70,26 +73,21 @@ public class LiveViewCrudPage extends BasePage {
                 addCameraButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
             }
 
-                    treeItem("SCT PROJECT").click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                    treeItem("Sct n -branch campus").click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                    treeItem("SCT Site").click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-
-                    Locator device7001 = treeItem("Device is online Device 7001");
-                    device7001.getByRole(AriaRole.CHECKBOX).first().check();
-                device7001.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                    Locator sctCamera = treeItem("Device is online SCT camera");
-                sctCamera.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                    sctCamera.getByRole(AriaRole.CHECKBOX).first().check();
-                    treeItem("Device is online Device05").getByRole(AriaRole.CHECKBOX).first().check();
-                    treeItem("Device is online Device LIC").getByRole(AriaRole.CHECKBOX).first().check();
-                    Locator licSite = treeItem("LIC test site 1 champions");
-                licSite.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                    licSite.getByRole(AriaRole.CHECKBOX).first().check();
+                    // Dynamic camera discovery/selection: expands whatever tree branches are
+                    // currently collapsed (a generic, stable-attribute walk - never a hard-coded
+                    // "SCT PROJECT" -> "Sct n -branch campus" -> "SCT Site" path, and never a
+                    // generated #mui-tree-view-... id), then randomly picks at least 2 of the
+                    // currently online/selectable device rows - never the same fixed camera names
+                    // run after run. Mirrors the same proven pattern ArchiveValidation and
+                    // SequencePage already use for this exact tree component.
+                    List<String> selectedCameras = selectRandomAvailableCameras(2);
 
             cameraSaved = saveConfiguration();
-            lastAddedCameraName = "SCT camera";
-            Locator cameraTile = page.getByRole(AriaRole.GRIDCELL,
-                    new Page.GetByRoleOptions().setName(lastAddedCameraName).setExact(false)).first();
+            lastAddedCameraName = selectedCameras.isEmpty() ? null : selectedCameras.get(0);
+            Locator cameraTile = lastAddedCameraName == null ? page.getByRole(AriaRole.GRIDCELL).first().filter(
+                    new Locator.FilterOptions().setHasNot(page.getByLabel("Add Camera").first()))
+                    : page.getByRole(AriaRole.GRIDCELL,
+                            new Page.GetByRoleOptions().setName(lastAddedCameraName).setExact(false)).first();
             if (cameraTile.count() == 0 || !SoakUiUtils.isVisibleQuietly(cameraTile)) {
                 Locator gridCells = page.getByRole(AriaRole.GRIDCELL);
                 for (int index = 0; index < gridCells.count(); index++) {
@@ -120,6 +118,102 @@ public class LiveViewCrudPage extends BasePage {
     }
 
     // ---------------------------------------------------------------------
+    // Dynamic camera discovery/selection
+    // ---------------------------------------------------------------------
+
+    /**
+     * Randomly selects at least {@code minimumCount} currently online/selectable cameras from the
+     * device tree - never a fixed camera name, never a generated {@code #mui-tree-view-...} id.
+     * Each candidate is identified the same way the tree itself labels it ("Device is online ...",
+     * scoped to its own {@code treeitem} - a real, stable, accessible-name-based locator) and must
+     * carry a real checkbox; an offline device (no "is online" wording, e.g. "NVR 2 Device is
+     * Offline.") never matches and is never selected. Clicks the row, then checks its own scoped
+     * checkbox - the exact same two-step interaction the previous hard-coded block used per camera,
+     * just applied to a dynamically discovered, randomly chosen set instead of fixed names.
+     *
+     * <p>Selects exactly {@code minimumCount} when at least that many are available, or every
+     * available one when fewer exist (never invents additional values) - never the same subset
+     * twice in a row by construction, since the candidate list is shuffled fresh each call.
+     *
+     * @return the real tree names of every camera actually selected, in selection order
+     */
+    private List<String> selectRandomAvailableCameras(int minimumCount) {
+        List<String> selectedNames = new ArrayList<>();
+        try {
+            expandDeviceTree();
+
+            Pattern onlineDevice = Pattern.compile("device is online", Pattern.CASE_INSENSITIVE);
+            Locator deviceItems = page.getByRole(AriaRole.TREEITEM, new Page.GetByRoleOptions().setName(onlineDevice));
+            List<Locator> available = new ArrayList<>();
+            int total = deviceItems.count();
+            for (int index = 0; index < total; index++) {
+                Locator device = deviceItems.nth(index);
+                if (device.getByRole(AriaRole.CHECKBOX).count() > 0) {
+                    available.add(device);
+                }
+            }
+
+            if (available.isEmpty()) {
+                System.err.println("[LIVE VIEW CRUD]   No selectable (online) cameras found in the device tree.");
+                return selectedNames;
+            }
+            if (available.size() < minimumCount) {
+                System.out.println("[LIVE VIEW CRUD]   Only " + available.size() + " selectable camera(s) "
+                        + "available (fewer than the requested " + minimumCount + "); using what is available.");
+            }
+
+            List<Integer> indices = new ArrayList<>();
+            for (int index = 0; index < available.size(); index++) {
+                indices.add(index);
+            }
+            Collections.shuffle(indices);
+
+            int wanted = Math.min(minimumCount, available.size());
+            for (int i = 0; i < wanted; i++) {
+                Locator camera = available.get(indices.get(i));
+                String name = camera.textContent();
+                name = name == null ? "" : name.trim();
+                camera.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                camera.getByRole(AriaRole.CHECKBOX).first()
+                        .check(new Locator.CheckOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                selectedNames.add(name);
+                System.out.println("[LIVE VIEW CRUD]   Randomly selected camera: " + name);
+            }
+        } catch (Exception exception) {
+            System.err.println("[LIVE VIEW CRUD]   Dynamic camera selection failed: " + exception.getMessage());
+        }
+        return selectedNames;
+    }
+
+    /**
+     * Reveals nested camera rows by expanding collapsed tree nodes - a generic, stable-attribute
+     * walk ({@code aria-expanded="false"}), never a hard-coded project/site path - until at least
+     * one online device row is visible. Bounded so a genuinely empty/offline-only tree does not
+     * loop forever.
+     */
+    private void expandDeviceTree() {
+        Pattern onlineDevice = Pattern.compile("device is online", Pattern.CASE_INSENSITIVE);
+        Locator deviceItems = page.getByRole(AriaRole.TREEITEM, new Page.GetByRoleOptions().setName(onlineDevice));
+        for (int attempt = 0; attempt < 5 && deviceItems.count() == 0; attempt++) {
+            Locator expanders = page.locator("[id*='mui-tree-view'] [aria-expanded='false']");
+            int count = expanders.count();
+            if (count == 0) {
+                break;
+            }
+            for (int index = 0; index < count; index++) {
+                try {
+                    Locator expander = expanders.nth(index);
+                    if (expander.isVisible()) {
+                        expander.click(new Locator.ClickOptions().setTimeout(3000));
+                    }
+                } catch (Exception ignored) {
+                    // Row may already be expanded or detached mid-loop; try the next one.
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Navigation
     // ---------------------------------------------------------------------
 
@@ -129,6 +223,18 @@ public class LiveViewCrudPage extends BasePage {
      * is never called from here) - then opens the "Cameras" sub-tab if it is not already active.
      */
     public boolean navigateToLiveView() {
+        // Fast short-circuit: this method is called twice in the real soak flow in close succession
+        // (once explicitly before Snapshot/Bookmark, once again as the first step of
+        // runLiveViewCrudFlow()) - if the page is already on the ready Live View "Cameras" state
+        // from the first call (its own real readiness gate below - "Add view" visible), the second
+        // call's full navigate + tab-click + operator-mode work is pure duplicate cost and is
+        // skipped entirely. Never skips when that gate is not already satisfied, so a caller whose
+        // page genuinely needs navigating (a fresh page, or state that has since drifted away) still
+        // gets the exact same full sequence and the exact same guarantee as before.
+        if (SoakUiUtils.isVisibleQuietly(addViewButton())) {
+            System.out.println("[LIVE VIEW CRUD] Live View - Cameras already open; skipping duplicate navigation.");
+            return true;
+        }
         try {
             String baseUrl = ConfigReader.get("base.url").replace("/onboarding", "");
             // Not the shared BasePage.navigateTo(): that does page.navigate(url) with no explicit

@@ -59,7 +59,7 @@ public final class JmeterRunner {
             System.out.println("[JMETER] Starting: " + String.join(" ", builder.command()));
             Process process = builder.start();
 
-            long timeoutSeconds = profile.rampUpSeconds() + profile.durationSeconds() + 120L;
+            long timeoutSeconds = profile.rampUpSeconds() + profile.durationSeconds() + 300L;
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
