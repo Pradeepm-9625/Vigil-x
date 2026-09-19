@@ -28,35 +28,7 @@ public final class LoadTestPlanBuilder {
     public static String build(String testPlanName, String host, int port, String bearerToken,
                                List<ApiDefinition> getApis, LoadProfile profile) {
         StringBuilder xml = new StringBuilder();
-        xml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        xml.append("<jmeterTestPlan version=\"1.2\" properties=\"5.0\" jmeter=\"5.6.3\">\n");
-        xml.append("  <hashTree>\n");
-        xml.append("    <TestPlan guiclass=\"TestPlanGui\" testclass=\"TestPlan\" testname=\"")
-                .append(escape(testPlanName)).append("\" enabled=\"true\">\n");
-        xml.append("      <boolProp name=\"TestPlan.functional_mode\">false</boolProp>\n");
-        xml.append("      <boolProp name=\"TestPlan.tearDown_on_shutdown\">true</boolProp>\n");
-        xml.append("      <boolProp name=\"TestPlan.serialize_threadgroups\">false</boolProp>\n");
-        xml.append("      <elementProp name=\"TestPlan.user_defined_variables\" elementType=\"Arguments\" "
-                + "guiclass=\"ArgumentsPanel\" testclass=\"Arguments\" testname=\"User Defined Variables\" "
-                + "enabled=\"true\">\n");
-        xml.append("        <collectionProp name=\"Arguments.arguments\">\n");
-        // Seeded with whatever token was available at generation time (real for a plan built via
-        // ApiAuthClient.login(), empty for a soak run's own captured-APIs plan with no REST login) -
-        // never left undefined, so ${accessToken} always resolves to SOMETHING from the very first
-        // sampler, even before any login sampler in the plan itself has run. The login sampler below
-        // (when the captured APIs include one) then OVERWRITES this with the real, freshly-observed
-        // token via its own JSON Extractor, so every sampler after it carries a live token instead of
-        // a stale/empty one.
-        xml.append("          <elementProp name=\"accessToken\" elementType=\"Argument\">\n");
-        xml.append("            <stringProp name=\"Argument.name\">accessToken</stringProp>\n");
-        xml.append("            <stringProp name=\"Argument.value\">").append(escape(bearerToken))
-                .append("</stringProp>\n");
-        xml.append("            <stringProp name=\"Argument.metadata\">=</stringProp>\n");
-        xml.append("          </elementProp>\n");
-        xml.append("        </collectionProp>\n");
-        xml.append("      </elementProp>\n");
-        xml.append("    </TestPlan>\n");
-        xml.append("    <hashTree>\n");
+        appendPlanOpen(xml, testPlanName, bearerToken, new String[0][]);
 
         appendThreadGroup(xml, testPlanName, profile);
         xml.append("      <hashTree>\n");
@@ -126,6 +98,160 @@ public final class LoadTestPlanBuilder {
         xml.append("  </hashTree>\n");
         xml.append("</jmeterTestPlan>\n");
         return xml.toString();
+    }
+
+    /**
+     * XML prologue through the open TestPlan children hashTree, shared by {@link #build} and
+     * {@link #buildOrdered}. ${accessToken} is seeded with whatever token was available at generation
+     * time (real for a plan built via ApiAuthClient.login(), empty otherwise) - never left undefined,
+     * so it always resolves from the very first sampler; a login sampler's own JSON Extractor then
+     * overwrites it with the real, freshly-observed token. {@code extraVariables} are additional
+     * {name, value} User Defined Variables.
+     */
+    private static void appendPlanOpen(StringBuilder xml, String testPlanName, String bearerToken,
+                                       String[][] extraVariables) {
+        xml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        xml.append("<jmeterTestPlan version=\"1.2\" properties=\"5.0\" jmeter=\"5.6.3\">\n");
+        xml.append("  <hashTree>\n");
+        xml.append("    <TestPlan guiclass=\"TestPlanGui\" testclass=\"TestPlan\" testname=\"")
+                .append(escape(testPlanName)).append("\" enabled=\"true\">\n");
+        xml.append("      <boolProp name=\"TestPlan.functional_mode\">false</boolProp>\n");
+        xml.append("      <boolProp name=\"TestPlan.tearDown_on_shutdown\">true</boolProp>\n");
+        xml.append("      <boolProp name=\"TestPlan.serialize_threadgroups\">false</boolProp>\n");
+        xml.append("      <elementProp name=\"TestPlan.user_defined_variables\" elementType=\"Arguments\" "
+                + "guiclass=\"ArgumentsPanel\" testclass=\"Arguments\" testname=\"User Defined Variables\" "
+                + "enabled=\"true\">\n");
+        xml.append("        <collectionProp name=\"Arguments.arguments\">\n");
+        appendVariable(xml, "accessToken", bearerToken);
+        for (String[] variable : extraVariables) {
+            appendVariable(xml, variable[0], variable[1]);
+        }
+        xml.append("        </collectionProp>\n");
+        xml.append("      </elementProp>\n");
+        xml.append("    </TestPlan>\n");
+        xml.append("    <hashTree>\n");
+    }
+
+    private static void appendVariable(StringBuilder xml, String name, String value) {
+        xml.append("          <elementProp name=\"").append(escape(name)).append("\" elementType=\"Argument\">\n");
+        xml.append("            <stringProp name=\"Argument.name\">").append(escape(name)).append("</stringProp>\n");
+        xml.append("            <stringProp name=\"Argument.value\">").append(escape(value == null ? "" : value))
+                .append("</stringProp>\n");
+        xml.append("            <stringProp name=\"Argument.metadata\">=</stringProp>\n");
+        xml.append("          </elementProp>\n");
+    }
+
+    /**
+     * Order-preserving plan for a soak run: exactly one HTTP sampler per captured request occurrence,
+     * in captured order, duplicates kept - NO CRUD grouping, NO login reordering, NO deduplication
+     * (every one of those would change what/where the JMX replays). Each sampler carries its own
+     * captured scheme/host/port, path+query, body and (non-transport) headers, so a plan spanning
+     * several hosts/ports still replays each call against the host it was really made to.
+     *
+     * @param requests same-index-aligned with {@code definitions}; {@code definitions.get(i)} is
+     *                 the {@link ApiDefinition} view of {@code requests.get(i)} (status/body/path)
+     */
+    public static String buildOrdered(String testPlanName, String defaultHost, int defaultPort,
+                                      String bearerToken, List<ApiDefinition> definitions,
+                                      List<java.util.Map<String, String>> extraHeaders,
+                                      List<String> schemes, String loginEmail, String loginPassword,
+                                      LoadProfile profile) {
+        StringBuilder xml = new StringBuilder();
+        appendPlanOpen(xml, testPlanName, bearerToken, new String[][] {
+                {"loginEmail", loginEmail}, {"loginPassword", loginPassword}});
+        appendThreadGroup(xml, testPlanName, profile);
+        xml.append("      <hashTree>\n");
+        appendHttpDefaults(xml, defaultHost, defaultPort);
+        xml.append("        <hashTree/>\n");
+        appendHeaderManager(xml);
+        xml.append("        <hashTree/>\n");
+        xml.append("        <CookieManager guiclass=\"CookiePanel\" testclass=\"CookieManager\" "
+                + "testname=\"HTTP Cookie Manager\" enabled=\"true\">\n");
+        xml.append("          <collectionProp name=\"CookieManager.cookies\"/>\n");
+        xml.append("          <boolProp name=\"CookieManager.clearEachIteration\">false</boolProp>\n");
+        xml.append("        </CookieManager>\n");
+        xml.append("        <hashTree/>\n");
+        appendConstantTimer(xml, profile.thinkTimeMs());
+        xml.append("        <hashTree/>\n");
+
+        for (int index = 0; index < definitions.size(); index++) {
+            ApiDefinition definition = definitions.get(index);
+            boolean login = isLoginApi(definition);
+            appendOrderedSampler(xml, index + 1, definition, schemes.get(index), login);
+            xml.append("        <hashTree>\n");
+            appendResponseAssertion(xml, definition);
+            xml.append("          <hashTree/>\n");
+            java.util.Map<String, String> headers = extraHeaders.get(index);
+            if (headers != null && !headers.isEmpty()) {
+                xml.append("          <HeaderManager guiclass=\"HeaderPanel\" testclass=\"HeaderManager\" "
+                        + "testname=\"Captured headers\" enabled=\"true\">\n");
+                xml.append("            <collectionProp name=\"HeaderManager.headers\">\n");
+                for (java.util.Map.Entry<String, String> header : headers.entrySet()) {
+                    xml.append("              <elementProp name=\"\" elementType=\"Header\">\n");
+                    xml.append("                <stringProp name=\"Header.name\">").append(escape(header.getKey()))
+                            .append("</stringProp>\n");
+                    xml.append("                <stringProp name=\"Header.value\">").append(escape(header.getValue()))
+                            .append("</stringProp>\n");
+                    xml.append("              </elementProp>\n");
+                }
+                xml.append("            </collectionProp>\n");
+                xml.append("          </HeaderManager>\n");
+                xml.append("          <hashTree/>\n");
+            }
+            if (login) {
+                appendJsonExtractor(xml, "accessToken", "$.accessToken");
+            }
+            xml.append("        </hashTree>\n");
+        }
+
+        xml.append("      </hashTree>\n");
+        xml.append("    </hashTree>\n");
+        appendResultCollector(xml);
+        xml.append("    <hashTree/>\n");
+        xml.append("  </hashTree>\n");
+        xml.append("</jmeterTestPlan>\n");
+        return xml.toString();
+    }
+
+    private static void appendOrderedSampler(StringBuilder xml, int position, ApiDefinition definition,
+                                             String scheme, boolean login) {
+        String host = definition.host() == null ? "" : definition.host();
+        String domain = host.contains(":") ? host.substring(0, host.indexOf(':')) : host;
+        String port = host.contains(":") ? host.substring(host.indexOf(':') + 1) : "";
+        String path = definition.samplePath()
+                + (definition.sampleQuery() == null || definition.sampleQuery().isBlank()
+                        ? "" : "?" + definition.sampleQuery());
+        String body = definition.sampleRequestBody();
+        if (login && body != null) {
+            // The captured body was secret-masked on capture (password -> ********), which can never
+            // log in on replay - the login sampler alone takes the password from the plan's own
+            // ${loginPassword} variable instead.
+            body = body.replaceAll("(\"password\"\\s*:\\s*)\"\\*+\"", "$1\"\\${loginPassword}\"");
+        }
+        xml.append("        <HTTPSamplerProxy guiclass=\"HttpTestSampleGui\" testclass=\"HTTPSamplerProxy\" "
+                + "testname=\"").append(escape(position + ". " + definition.method() + " " + definition.samplePath()))
+                .append("\" enabled=\"true\">\n");
+        xml.append("          <stringProp name=\"HTTPSampler.domain\">").append(escape(domain)).append("</stringProp>\n");
+        xml.append("          <stringProp name=\"HTTPSampler.port\">").append(escape(port)).append("</stringProp>\n");
+        xml.append("          <stringProp name=\"HTTPSampler.protocol\">").append(escape(scheme)).append("</stringProp>\n");
+        xml.append("          <stringProp name=\"HTTPSampler.path\">").append(escape(path)).append("</stringProp>\n");
+        xml.append("          <stringProp name=\"HTTPSampler.method\">").append(escape(definition.method()))
+                .append("</stringProp>\n");
+        xml.append("          <boolProp name=\"HTTPSampler.follow_redirects\">true</boolProp>\n");
+        xml.append("          <boolProp name=\"HTTPSampler.use_keepalive\">true</boolProp>\n");
+        if (body != null && !body.isBlank()) {
+            xml.append("          <boolProp name=\"HTTPSampler.postBodyRaw\">true</boolProp>\n");
+            xml.append("          <elementProp name=\"HTTPsampler.Arguments\" elementType=\"Arguments\">\n");
+            xml.append("            <collectionProp name=\"Arguments.arguments\">\n");
+            xml.append("              <elementProp name=\"\" elementType=\"HTTPArgument\">\n");
+            xml.append("                <boolProp name=\"HTTPArgument.always_encode\">false</boolProp>\n");
+            xml.append("                <stringProp name=\"Argument.value\">").append(escape(body)).append("</stringProp>\n");
+            xml.append("                <stringProp name=\"Argument.metadata\">=</stringProp>\n");
+            xml.append("              </elementProp>\n");
+            xml.append("            </collectionProp>\n");
+            xml.append("          </elementProp>\n");
+        }
+        xml.append("        </HTTPSamplerProxy>\n");
     }
 
     /**

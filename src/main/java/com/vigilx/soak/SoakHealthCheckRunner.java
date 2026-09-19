@@ -678,7 +678,7 @@ public final class SoakHealthCheckRunner {
                 // inventory) - additive only, caught here exactly like every other reporting step
                 // above so a JMX-generation problem can never affect this run's own result.
                 SoakApiJmxGenerator.generate(SoakRunContext.current().runDirectory(),
-                        "VigilX_Soak_Captured_APIs_" + result.executionId);
+                        "VigilX SoakTest All APIs " + result.executionId);
             } catch (Exception ignored) { }
             PlaywrightFactory.closeBrowser();
         }

@@ -141,6 +141,45 @@ public final class ApiMonitor {
     /** Distinct inventory entries dropped once MAX_INVENTORY_ENTRIES was reached. */
     private static final AtomicInteger INVENTORY_DROPPED = new AtomicInteger();
 
+    /**
+     * Every captured request occurrence, in the order its response was observed - duplicates KEPT
+     * (unlike INVENTORY above, which collapses repeats of the same method+host+path+query into one
+     * entry with a counter). Feeds the per-soak-run replay JMX and API summary; INVENTORY and every
+     * existing report stay exactly as they were. Recorded only when {@code api.inventory.enabled=true}.
+     */
+    private static final ConcurrentLinkedQueue<CapturedRequest> ALL_REQUESTS = new ConcurrentLinkedQueue<>();
+    private static final java.util.concurrent.atomic.AtomicLong ALL_REQUESTS_SEQUENCE =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Occurrences not stored because {@code api.capture.max.requests} was reached - always reported. */
+    private static final AtomicInteger ALL_REQUESTS_DROPPED = new AtomicInteger();
+    private static final int MAX_ALL_REQUESTS = 200000;
+
+    /** One captured request occurrence (request side only - what a JMeter replay needs). */
+    public static final class CapturedRequest {
+        public final long sequence;
+        public final String method;
+        public final String scheme;
+        public final String host;
+        public final String path;
+        public final String query;
+        public final int status;
+        public final Map<String, String> requestHeaders;
+        public final String requestBody;
+
+        CapturedRequest(long sequence, String method, String scheme, String host, String path, String query,
+                        int status, Map<String, String> requestHeaders, String requestBody) {
+            this.sequence = sequence;
+            this.method = method;
+            this.scheme = scheme;
+            this.host = host;
+            this.path = path;
+            this.query = query;
+            this.status = status;
+            this.requestHeaders = requestHeaders;
+            this.requestBody = requestBody;
+        }
+    }
+
     /** Pages/contexts already carrying listeners, so a re-attach cannot double-count. */
     private static final Set<Page> ATTACHED_PAGES =
             Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
@@ -546,6 +585,7 @@ public final class ApiMonitor {
         if (!isInventoryEnabled()) {
             return;
         }
+        recordCapturedRequest(request, response, status);
         try {
             String method = safeMethod(request);
             URI uri = URI.create(response.url());
@@ -586,6 +626,46 @@ public final class ApiMonitor {
         } catch (Exception exception) {
             System.err.println("[API MONITOR] Skipped an inventory entry: " + exception.getMessage());
         }
+    }
+
+    /** Appends this occurrence to ALL_REQUESTS - never deduplicated, never throws into the caller. */
+    private static void recordCapturedRequest(Request request, Response response, int status) {
+        try {
+            if (ALL_REQUESTS.size() >= maxCapturedRequests()) {
+                ALL_REQUESTS_DROPPED.incrementAndGet();
+                return;
+            }
+            URI uri = URI.create(response.url());
+            String host = uri.getHost() == null ? "" : uri.getHost() + (uri.getPort() > 0 ? ":" + uri.getPort() : "");
+            String path = uri.getPath() == null || uri.getPath().isBlank() ? "/" : uri.getPath();
+            ALL_REQUESTS.add(new CapturedRequest(ALL_REQUESTS_SEQUENCE.incrementAndGet(), safeMethod(request),
+                    uri.getScheme() == null ? "http" : uri.getScheme(), host, path, uri.getQuery(), status,
+                    SecretMasker.maskHeaders(safeRequestHeaders(request)),
+                    SecretMasker.maskBody(safeRequestBody(request), MAX_INVENTORY_BODY_CHARACTERS)));
+        } catch (Exception exception) {
+            ALL_REQUESTS_DROPPED.incrementAndGet();
+            System.err.println("[API MONITOR] Could not record a captured request occurrence: "
+                    + exception.getMessage());
+        }
+    }
+
+    private static int maxCapturedRequests() {
+        try {
+            String value = ConfigReader.getOrDefault("api.capture.max.requests", String.valueOf(MAX_ALL_REQUESTS));
+            return value.isBlank() ? MAX_ALL_REQUESTS : Integer.parseInt(value.trim());
+        } catch (Exception exception) {
+            return MAX_ALL_REQUESTS;
+        }
+    }
+
+    /** Every captured request occurrence, in observed order, duplicates included. */
+    public static List<CapturedRequest> getAllCapturedRequests() {
+        return new ArrayList<>(ALL_REQUESTS);
+    }
+
+    /** Occurrences that could not be stored (cap reached or a capture error) - reported, never silent. */
+    public static int getCapturedRequestsDropped() {
+        return ALL_REQUESTS_DROPPED.get();
     }
 
     private static Map<String, String> safeRequestHeaders(Request request) {
@@ -1168,6 +1248,9 @@ public final class ApiMonitor {
         INVENTORY.clear();
         INVENTORY_BY_KEY.clear();
         INVENTORY_DROPPED.set(0);
+        ALL_REQUESTS.clear();
+        ALL_REQUESTS_SEQUENCE.set(0);
+        ALL_REQUESTS_DROPPED.set(0);
     }
 
     /** Destination of the consolidated report. */
