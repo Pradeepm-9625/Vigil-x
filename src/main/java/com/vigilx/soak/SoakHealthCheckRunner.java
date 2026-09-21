@@ -31,6 +31,7 @@ import com.vigilx.pages.GroupsPage;
 import com.vigilx.pages.LicensePage;
 import com.vigilx.pages.LiveViewCrudPage;
 import com.vigilx.pages.MasterConfigurationValidation;
+import com.vigilx.pages.NotificationRulesPage;
 import com.vigilx.pages.OrganizationData;
 import com.vigilx.pages.OrganizationPage;
 import com.vigilx.pages.ProjectInformationData;
@@ -222,6 +223,14 @@ public final class SoakHealthCheckRunner {
                                 applicationSettings::validateEnableQc);
                         validatePage(page, result, "Application Settings - Enable VA Alerts",
                                 applicationSettings::validateEnableVaAlerts);
+                        // Device -> Notification Rules: random toggle OFF/ON checks. Additive; runs
+                        // before Users & Roles, which follows unchanged.
+                        if (Boolean.parseBoolean(
+                                ConfigReader.getOrDefault("soak.enable.notification.rules", "true"))) {
+                            NotificationRulesPage notificationRules = new NotificationRulesPage(page);
+                            validatePage(page, result, "Application Settings - Notification Rules",
+                                    notificationRules::runNotificationRulesFlow);
+                        }
                     }
                 }
             }
@@ -232,10 +241,15 @@ public final class SoakHealthCheckRunner {
             // (untouched). Config-gated; additive.
             if (config.userCreationEnabled()) {
                 UsersRolesPage usersRoles = new UsersRolesPage(page);
+                // Only the number after "+" in the configured email is replaced with a per-run unique
+                // value (6 digits of epoch seconds); an email without a "+tag" is used unchanged.
+                String userEmail = ConfigReader.getOrDefault("user.creation.email", "pradeep.m+50@solutionchamps.com")
+                        .replaceFirst("\\+[^@]*@", java.util.regex.Matcher.quoteReplacement("+"
+                                + String.format("%06d", (System.currentTimeMillis() / 1000) % 1_000_000) + "@"));
                 UserData newUser = new UserData(
                         ConfigReader.getOrDefault("user.creation.first.name", "Pradeep"),
                         ConfigReader.getOrDefault("user.creation.last.name", "Testing"),
-                        ConfigReader.getOrDefault("user.creation.email", "pradeep.m+50@solutionchamps.com"),
+                        userEmail,
                         ConfigReader.getOrDefault("user.creation.mobile", "99999999999"),
                         ConfigReader.getOrDefault("user.creation.role", "Quality Check"),
                         ConfigReader.getOrDefault("user.creation.group", "Test"),
@@ -273,16 +287,25 @@ public final class SoakHealthCheckRunner {
                 // of UsersRolesPage and RolesPage, neither of which it modifies.
                 if (config.groupCreationEnabled()) {
                     GroupsPage groups = new GroupsPage(page);
-                    GroupData newGroup = new GroupData(
-                            ConfigReader.getOrDefault("group.creation.name", "Testing group"),
-                            true, true, true);
+                    // Unique per run (config value + timestamp): a static name collides with the group
+                    // left by an earlier run and makes the create fail as a duplicate.
+                    // The field allows 30 characters and the rename appends " update", so the created name
+                    // is capped at 20: base (trimmed to fit) + space + 6 digits of epoch seconds
+                    // (repeats only every ~11.5 days, versus ~17 minutes for the last 6 millis digits).
+                    String millis = String.format("%06d", (System.currentTimeMillis() / 1000) % 1_000_000);
+                    String groupBase = ConfigReader.getOrDefault("group.creation.name", "Testing group");
+                    if (groupBase.length() > 13) {
+                        groupBase = groupBase.substring(0, 13).trim();
+                    }
+                    String uniqueGroupName = groupBase + " " + millis.substring(millis.length() - 6);
+                    GroupData newGroup = new GroupData(uniqueGroupName, true, true, true);
                     GroupData updatedGroup = new GroupData(
                             // The separating space is added here in code, not carried by the config
                             // value - confirmed live: ConfigReader.getOrDefault() trims its result,
                             // which silently discards a leading space even when the properties file
                             // escapes it, so a config-carried " update" always collapsed back to
                             // "update" and produced "Testing groupupdate" with no space.
-                            ConfigReader.getOrDefault("group.creation.name", "Testing group") + " "
+                            uniqueGroupName + " "
                                     + ConfigReader.getOrDefault("group.update.name.suffix", "update"),
                             true, true, true);
                     validatePage(page, result, "Users & Roles - Group Lifecycle",

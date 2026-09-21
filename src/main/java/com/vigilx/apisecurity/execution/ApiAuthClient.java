@@ -27,7 +27,7 @@ public final class ApiAuthClient {
     public static String login(String scheme, String host) {
         String username = ConfigReader.get("username");
         String password = ConfigReader.get("password");
-        String url = scheme + "://" + host + "/auth/login";
+        String url = scheme + "://" + host + ConfigReader.getOrDefault("apisecurity.auth.login.path", "/auth/login");
 
         Response response = RestAssured.given()
                 .header("accept", "application/json")

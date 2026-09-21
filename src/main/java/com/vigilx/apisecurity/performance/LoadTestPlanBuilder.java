@@ -159,7 +159,7 @@ public final class LoadTestPlanBuilder {
         StringBuilder xml = new StringBuilder();
         appendPlanOpen(xml, testPlanName, bearerToken, new String[][] {
                 {"loginEmail", loginEmail}, {"loginPassword", loginPassword}});
-        appendThreadGroup(xml, testPlanName, profile);
+        appendSinglePassThreadGroup(xml, testPlanName);
         xml.append("      <hashTree>\n");
         appendHttpDefaults(xml, defaultHost, defaultPort);
         xml.append("        <hashTree/>\n");
@@ -174,23 +174,144 @@ public final class LoadTestPlanBuilder {
         appendConstantTimer(xml, profile.thinkTimeMs());
         xml.append("        <hashTree/>\n");
 
+        // Created-id chaining: a captured PUT/PATCH/DELETE on <base>/{id} carries the id from the ORIGINAL
+        // run, which does not exist when the plan is replayed (hence 404s). For each such request the
+        // most recent earlier POST on the same <base> gets a JSON Extractor ($.id -> createdId_N) and
+        // the request's id segment becomes ${createdId_N}. The extractor's default is the originally
+        // captured id, so if a create fails the request still behaves exactly as it did before.
+        int total = definitions.size();
+        java.util.Map<String, Integer> lastPost = new java.util.HashMap<>();
+        String[] createdVar = new String[total];
+        String[] createdDefault = new String[total];
+        String[] rewrittenPath = new String[total];
+        String[] rewrittenBody = new String[total];
+        java.util.Map<String, Integer> knownIds = new java.util.HashMap<>();
+        for (int j = 0; j < total; j++) {
+            ApiDefinition d = definitions.get(j);
+            // Parent-id chaining: a body field like "sectionId":"<uuid>" references a record created
+            // earlier in the capture (POST .../sections), which does not exist on replay (404). Point it
+            // at the id that earlier POST returns; the extractor default keeps the captured id.
+            if (d.hasSampleRequestBody() && !"GET".equals(d.method()) && !"DELETE".equals(d.method())) {
+                String body = d.sampleRequestBody();
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                        "\"([A-Za-z]+)Id\"\\s*:\\s*\"([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})\"").matcher(body);
+                StringBuffer out = new StringBuffer();
+                boolean changed = false;
+                while (m.find()) {
+                    String stem = m.group(1).toLowerCase(java.util.Locale.ROOT);
+                    int source = -1;
+                    for (int k = j - 1; k >= 0 && source < 0; k--) {
+                        ApiDefinition c = definitions.get(k);
+                        if ("POST".equals(c.method()) && c.normalizedPath() != null
+                                && !isLoginApi(c)) {
+                            String p = c.normalizedPath().toLowerCase(java.util.Locale.ROOT);
+                            String last = p.substring(p.lastIndexOf('/') + 1);
+                            if (last.startsWith(stem)) {
+                                source = k;
+                            }
+                        }
+                    }
+                    if (source < 0) {
+                        m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(m.group()));
+                        continue;
+                    }
+                    if (createdVar[source] == null) {
+                        createdVar[source] = "createdId_" + (source + 1);
+                        createdDefault[source] = m.group(2);
+                    }
+                    m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(
+                            "\"" + m.group(1) + "Id\":\"${" + createdVar[source] + "}\""));
+                    changed = true;
+                }
+                m.appendTail(out);
+                if (changed) {
+                    rewrittenBody[j] = out.toString();
+                }
+            }
+            if ("POST".equals(d.method())) {
+                lastPost.put(d.normalizedPath(), j);
+                continue;
+            }
+            if (!"PUT".equals(d.method()) && !"PATCH".equals(d.method()) && !"DELETE".equals(d.method())
+                    && !"GET".equals(d.method())) {
+                continue;
+            }
+            String[] norm = d.normalizedPath().split("/", -1);
+            String[] real = d.samplePath().split("/", -1);
+            if (norm.length != real.length) {
+                continue;
+            }
+            // Every {id} segment (not only the last one, and for GET reads too: 404 "not found" on
+            // /devices/{id}/..., /master-configurations/{id}) is pointed at the record created by the
+            // most recent earlier POST on that base. The same captured id seen again later maps to
+            // the same variable even where no POST base matches (e.g. /recording/status/{id}).
+            boolean rewritten = false;
+            for (int k = 1; k < norm.length; k++) {
+                if (!"{id}".equals(norm[k])) {
+                    continue;
+                }
+                Integer post = lastPost.get(String.join("/", java.util.Arrays.copyOfRange(norm, 0, k)));
+                if (post != null) {
+                    if (createdVar[post] == null) {
+                        createdVar[post] = "createdId_" + (post + 1);
+                        createdDefault[post] = real[k];
+                    }
+                    knownIds.putIfAbsent(real[k], post);
+                }
+                Integer source = post != null ? post : knownIds.get(real[k]);
+                if (source != null) {
+                    real[k] = "${" + createdVar[source] + "}";
+                    rewritten = true;
+                }
+            }
+            if (rewritten) {
+                rewrittenPath[j] = String.join("/", real);
+            }
+        }
+
         for (int index = 0; index < definitions.size(); index++) {
             ApiDefinition definition = definitions.get(index);
             boolean login = isLoginApi(definition);
-            appendOrderedSampler(xml, index + 1, definition, schemes.get(index), login);
+            java.util.Map<String, String> headers = extraHeaders.get(index);
+            String multipartBody = null;
+            if (headers != null) {
+                String contentTypeKey = null;
+                for (String key : headers.keySet()) {
+                    if ("content-type".equalsIgnoreCase(key)
+                            && headers.get(key).toLowerCase(java.util.Locale.ROOT).startsWith("multipart/")) {
+                        contentTypeKey = key;
+                    }
+                }
+                if (contentTypeKey != null) {
+                    // The captured multipart body is truncated/binary and its boundary can't be replayed
+                    // ("Multipart: Unexpected end of form" -> 400): rebuild a complete, valid form.
+                    headers = new java.util.LinkedHashMap<>(headers);
+                    headers.put(contentTypeKey, "multipart/form-data; boundary=" + MULTIPART_BOUNDARY);
+                    multipartBody = buildMultipartBody(definition.sampleRequestBody());
+                }
+            }
+            appendOrderedSampler(xml, index + 1, definition, schemes.get(index), login, rewrittenPath[index],
+                    multipartBody != null ? multipartBody
+                            : uniqueNames(definition, rewrittenBody[index] != null
+                                    ? rewrittenBody[index] : definition.sampleRequestBody()));
             xml.append("        <hashTree>\n");
             appendResponseAssertion(xml, definition);
             xml.append("          <hashTree/>\n");
-            java.util.Map<String, String> headers = extraHeaders.get(index);
             if (headers != null && !headers.isEmpty()) {
                 xml.append("          <HeaderManager guiclass=\"HeaderPanel\" testclass=\"HeaderManager\" "
                         + "testname=\"Captured headers\" enabled=\"true\">\n");
                 xml.append("            <collectionProp name=\"HeaderManager.headers\">\n");
                 for (java.util.Map.Entry<String, String> header : headers.entrySet()) {
+                    String headerValue = header.getValue();
+                    // A captured Authorization token is stale on replay (-> 401) and, being a
+                    // sampler-level header, overrides the plan-level one; use the live token instead.
+                    if ("authorization".equalsIgnoreCase(header.getKey()) && !login) {
+                        headerValue = "Bearer ${accessToken}";
+                    }
                     xml.append("              <elementProp name=\"\" elementType=\"Header\">\n");
                     xml.append("                <stringProp name=\"Header.name\">").append(escape(header.getKey()))
                             .append("</stringProp>\n");
-                    xml.append("                <stringProp name=\"Header.value\">").append(escape(header.getValue()))
+                    xml.append("                <stringProp name=\"Header.value\">").append(escape(headerValue))
                             .append("</stringProp>\n");
                     xml.append("              </elementProp>\n");
                 }
@@ -200,6 +321,9 @@ public final class LoadTestPlanBuilder {
             }
             if (login) {
                 appendJsonExtractor(xml, "accessToken", "$.accessToken");
+            }
+            if (createdVar[index] != null) {
+                appendJsonExtractor(xml, createdVar[index], "$.id", createdDefault[index]);
             }
             xml.append("        </hashTree>\n");
         }
@@ -213,15 +337,64 @@ public final class LoadTestPlanBuilder {
         return xml.toString();
     }
 
+    /**
+     * A create (POST) replayed with its captured {@code "name"} hits "already exists" (409). Keep the
+     * captured text but make it unique per run: a trailing timestamp-like number is replaced by
+     * ${__time()}, otherwise ${__time()} is appended. Returns the body unchanged otherwise.
+     */
+    private static String uniqueNames(ApiDefinition definition, String body) {
+        if (body == null || !"POST".equals(definition.method()) || isLoginApi(definition)) {
+            return body;
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(\"name\"\\s*:\\s*\")([^\"]*?)(\\d{10,13})?(\")").matcher(body);
+        StringBuffer out = new StringBuffer();
+        boolean changed = false;
+        while (m.find()) {
+            String base = m.group(2);
+            if (base.contains("${") || (base.isBlank() && m.group(3) == null)) {
+                m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(m.group()));
+                continue;
+            }
+            m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(
+                    m.group(1) + base + "${__time()}" + m.group(4)));
+            changed = true;
+        }
+        m.appendTail(out);
+        return changed ? out.toString() : body;
+    }
+
+    private static final String MULTIPART_BOUNDARY = "----VigilXBoundary7MA4YWxkTrZu0gW";
+
+    private static String buildMultipartBody(String captured) {
+        String field = "file";
+        String filename = "sample.txt";
+        if (captured != null) {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("name=\"([^\"]+)\"; filename=\"([^\"]*)\"").matcher(captured);
+            if (m.find()) {
+                field = m.group(1);
+                filename = m.group(2).isBlank() ? filename : m.group(2);
+            }
+        }
+        return "--" + MULTIPART_BOUNDARY + "\r\nContent-Disposition: form-data; name=\"" + field
+                + "\"; filename=\"" + filename + "\"\r\nContent-Type: text/plain\r\n\r\nVigilX sample upload\r\n--"
+                + MULTIPART_BOUNDARY + "--\r\n";
+    }
+
     private static void appendOrderedSampler(StringBuilder xml, int position, ApiDefinition definition,
-                                             String scheme, boolean login) {
+                                             String scheme, boolean login, String pathOverride,
+                                             String bodyOverride) {
         String host = definition.host() == null ? "" : definition.host();
         String domain = host.contains(":") ? host.substring(0, host.indexOf(':')) : host;
-        String port = host.contains(":") ? host.substring(host.indexOf(':') + 1) : "";
-        String path = definition.samplePath()
+        // No explicit port: pin the scheme's own default, otherwise HTTP Request Defaults' port
+        // (of the first host) leaks into samplers for other hosts/https and yields 404/400.
+        String port = host.contains(":") ? host.substring(host.indexOf(':') + 1)
+                : ("https".equalsIgnoreCase(scheme) ? "443" : "80");
+        String path = (pathOverride != null ? pathOverride : definition.samplePath())
                 + (definition.sampleQuery() == null || definition.sampleQuery().isBlank()
                         ? "" : "?" + definition.sampleQuery());
-        String body = definition.sampleRequestBody();
+        String body = bodyOverride != null ? bodyOverride : definition.sampleRequestBody();
         if (login && body != null) {
             // The captured body was secret-masked on capture (password -> ********), which can never
             // log in on replay - the login sampler alone takes the password from the plan's own
@@ -245,7 +418,7 @@ public final class LoadTestPlanBuilder {
             xml.append("            <collectionProp name=\"Arguments.arguments\">\n");
             xml.append("              <elementProp name=\"\" elementType=\"HTTPArgument\">\n");
             xml.append("                <boolProp name=\"HTTPArgument.always_encode\">false</boolProp>\n");
-            xml.append("                <stringProp name=\"Argument.value\">").append(escape(body)).append("</stringProp>\n");
+            xml.append("                <stringProp name=\"Argument.value\">").append(escape(body).replace("\r", "&#13;")).append("</stringProp>\n");
             xml.append("                <stringProp name=\"Argument.metadata\">=</stringProp>\n");
             xml.append("              </elementProp>\n");
             xml.append("            </collectionProp>\n");
@@ -268,6 +441,31 @@ public final class LoadTestPlanBuilder {
         int lastSlash = path.lastIndexOf('/');
         String lastSegment = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
         return "login".equals(lastSegment);
+    }
+
+    /**
+     * One thread, one loop, no duration scheduler: the soak replay plan must execute EVERY captured
+     * sampler exactly once, in order. The load-test thread group below is a time-boxed scheduler
+     * (users/duration from config), which ended a 300+ sampler replay after ~30 seconds - confirmed
+     * in the JMeter GUI, where it stopped around sampler 33.
+     */
+    private static void appendSinglePassThreadGroup(StringBuilder xml, String name) {
+        xml.append("    <ThreadGroup guiclass=\"ThreadGroupGui\" testclass=\"ThreadGroup\" testname=\"")
+                .append(escape(name)).append("\" enabled=\"true\">\n");
+        xml.append("      <stringProp name=\"ThreadGroup.on_sample_error\">continue</stringProp>\n");
+        xml.append("      <elementProp name=\"ThreadGroup.main_controller\" elementType=\"LoopController\" "
+                + "guiclass=\"LoopControlPanel\" testclass=\"LoopController\" testname=\"Loop Controller\" "
+                + "enabled=\"true\">\n");
+        xml.append("        <boolProp name=\"LoopController.continue_forever\">false</boolProp>\n");
+        xml.append("        <stringProp name=\"LoopController.loops\">1</stringProp>\n");
+        xml.append("      </elementProp>\n");
+        xml.append("      <stringProp name=\"ThreadGroup.num_threads\">1</stringProp>\n");
+        xml.append("      <stringProp name=\"ThreadGroup.ramp_time\">1</stringProp>\n");
+        xml.append("      <boolProp name=\"ThreadGroup.scheduler\">false</boolProp>\n");
+        xml.append("      <stringProp name=\"ThreadGroup.duration\"></stringProp>\n");
+        xml.append("      <stringProp name=\"ThreadGroup.delay\"></stringProp>\n");
+        xml.append("      <boolProp name=\"ThreadGroup.same_user_on_next_iteration\">true</boolProp>\n");
+        xml.append("    </ThreadGroup>\n");
     }
 
     private static void appendThreadGroup(StringBuilder xml, String name, LoadProfile profile) {
@@ -397,12 +595,22 @@ public final class LoadTestPlanBuilder {
      * login (e.g. a soak run's own captured-APIs JMX).
      */
     private static void appendJsonExtractor(StringBuilder xml, String variableName, String jsonPathExpr) {
+        appendJsonExtractor(xml, variableName, jsonPathExpr, null);
+    }
+
+    /** As above, with {@code defaultValue} used when the JSONPath finds no match (null = none). */
+    private static void appendJsonExtractor(StringBuilder xml, String variableName, String jsonPathExpr,
+                                            String defaultValue) {
         xml.append("          <JSONPostProcessor guiclass=\"JSONPostProcessorGui\" testclass=\"JSONPostProcessor\" "
                 + "testname=\"Extract ").append(escape(variableName)).append("\" enabled=\"true\">\n");
         xml.append("            <stringProp name=\"JSONPostProcessor.referenceNames\">")
                 .append(escape(variableName)).append("</stringProp>\n");
         xml.append("            <stringProp name=\"JSONPostProcessor.jsonPathExprs\">")
                 .append(escape(jsonPathExpr)).append("</stringProp>\n");
+        if (defaultValue != null && !defaultValue.isBlank()) {
+            xml.append("            <stringProp name=\"JSONPostProcessor.defaultValues\">")
+                    .append(escape(defaultValue)).append("</stringProp>\n");
+        }
         xml.append("            <stringProp name=\"JSONPostProcessor.match_numbers\">1</stringProp>\n");
         xml.append("            <boolProp name=\"JSONPostProcessor.compute_concat\">false</boolProp>\n");
         xml.append("          </JSONPostProcessor>\n");
