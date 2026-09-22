@@ -314,9 +314,90 @@ public class UsersRolesPage extends BasePage {
         return selectFromDropdown("Select Role", role, "Role");
     }
 
-    /** Opens the Group dropdown, picks {@code group}, and confirms it is now shown as the value. */
+    /**
+     * Opens the Group dropdown and picks one of whatever options it currently lists, at random -
+     * never the fixed {@code group} name from config/{@link UserData}, since that value can go
+     * stale (renamed/deleted group) and does not need to be a specific one for this flow to be
+     * valid. Falls back to {@code group} itself only if the dropdown lists no options at all.
+     */
     public boolean selectGroup(String group) {
-        return selectFromDropdown("Select Group", group, "Group");
+        Locator combobox = page.getByRole(AriaRole.COMBOBOX)
+                .filter(new Locator.FilterOptions().setHasText("Select Group")).first();
+        if (!SoakUiUtils.waitVisible(combobox, ELEMENT_TIMEOUT_MS)) {
+            boolean alreadySet = SoakUiUtils.isVisibleQuietly(page.getByText(group,
+                    new Page.GetByTextOptions().setExact(true)).first());
+            System.out.println("[USERS & ROLES]   Group combobox ('Select Group') not found; a value is"
+                    + " already selected: " + alreadySet);
+            return alreadySet;
+        }
+
+        String randomGroup = null;
+        try {
+            Locator option = null;
+            for (int attempt = 1; attempt <= 3 && option == null; attempt++) {
+                combobox.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                page.waitForTimeout(300L * attempt + 600L);
+                option = randomVisibleOption();
+            }
+            if (option == null) {
+                System.err.println("[USERS & ROLES]   Group dropdown listed no selectable option. Visible"
+                        + " option-like items: " + visibleOptionSample());
+                try {
+                    page.keyboard().press("Escape");
+                } catch (Exception ignored) {
+                    // best effort
+                }
+                return selectFromDropdown("Select Group", group, "Group");
+            }
+            randomGroup = option.innerText().trim();
+            option.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(400);
+        } catch (Exception exception) {
+            System.err.println("[USERS & ROLES]   Could not select a random Group option: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+
+        boolean placeholderGone = page.getByRole(AriaRole.COMBOBOX)
+                .filter(new Locator.FilterOptions().setHasText("Select Group")).count() == 0;
+        System.out.println("[USERS & ROLES]   Group selected (random: '" + randomGroup + "'): "
+                + (placeholderGone ? "YES" : "NOT CONFIRMED"));
+        return placeholderGone;
+    }
+
+    /**
+     * One visible option from the currently open dropdown, picked at random - scoped to the open
+     * dropdown's own {@code role=listbox} popup (confirmed live, same portal pattern as
+     * {@link LiveViewCrudPage}'s option lists) rather than a page-wide button/option scan, which
+     * could otherwise land on an unrelated page control (e.g. a dialog action button) and click
+     * that instead of a real group option.
+     */
+    private Locator randomVisibleOption() {
+        Locator listbox = page.getByRole(AriaRole.LISTBOX).first();
+        // Scoped to the open dropdown's own listbox popup when present. When a build renders no
+        // listbox, fall back to page-wide option/menuitem roles only - deliberately never a bare
+        // page-wide BUTTON role here, which risks matching an unrelated page control (a dialog
+        // action button, say) instead of a real dropdown option.
+        Locator items = SoakUiUtils.isVisibleQuietly(listbox)
+                ? listbox.getByRole(AriaRole.OPTION).or(listbox.getByRole(AriaRole.MENUITEM))
+                        .or(listbox.getByRole(AriaRole.BUTTON))
+                : page.getByRole(AriaRole.OPTION).or(page.getByRole(AriaRole.MENUITEM));
+        int count = Math.min(items.count(), 40);
+        java.util.List<Locator> visible = new java.util.ArrayList<>();
+        for (int index = 0; index < count; index++) {
+            Locator item = items.nth(index);
+            try {
+                if (item.isVisible() && !item.innerText().isBlank()) {
+                    visible.add(item);
+                }
+            } catch (Exception ignored) {
+                // skip
+            }
+        }
+        if (visible.isEmpty()) {
+            return null;
+        }
+        return visible.get(new java.util.Random().nextInt(visible.size()));
     }
 
     /**
@@ -500,11 +581,13 @@ public class UsersRolesPage extends BasePage {
         Response response = SoakUiUtils.clickAndWaitForResponse(
                 page, saveChanges, this::isUserSaveResponse, 20000);
         if (response == null) {
-            System.err.println("[USERS & ROLES]   'Save changes': no matching create-user API response within 20s.");
-            // The completion dialog appearing is still a signal the save went through.
-            return SoakUiUtils.waitVisible(page.getByRole(AriaRole.BUTTON,
-                    new Page.GetByRoleOptions().setName(Pattern.compile("^(done|close dialog)$",
-                            Pattern.CASE_INSENSITIVE))).first(), ELEMENT_TIMEOUT_MS);
+            // No API confirmation within 20s is a failure, never inferred as success from the
+            // completion dialog alone (the same dialog controls can appear on a failed save too) -
+            // matching GroupsPage's own create-flow precedent, which fails outright on a null
+            // response rather than trusting UI state as a proxy for the API result.
+            System.err.println("[USERS & ROLES]   'Save changes': no matching create-user API response within 20s. "
+                    + "Treating as FAILED.");
+            return false;
         }
 
         int status = response.status();

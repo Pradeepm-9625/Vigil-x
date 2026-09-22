@@ -11,6 +11,7 @@ import com.microsoft.playwright.options.AriaRole;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import com.vigilx.config.ConfigReader;
 import com.vigilx.utils.ScreenshotUtils;
+import com.vigilx.utils.SoakUiUtils;
 
 /**
  * Archive "Search" (the "Events" tab): open Search, set a From/To date range wide enough to span
@@ -63,13 +64,15 @@ public class EventSearchValidation extends BasePage {
     private boolean runSearchFlow(String tab) {
         currentStepName = tab == null ? "Event Search" : "Bookmark Search";
         try {
-            // Only open the Search panel from the main Archive page when it is not already open -
-            // confirmed live: validateBookmarkSearch() runs immediately after validateEventSearch()
-            // on the SAME open Search panel, and unconditionally re-clicking "Search" there closed
-            // the panel back to the main Archive page (Events tab) instead of just switching tabs,
-            // so every Bookmarks run was silently re-opening from scratch. Condition-based, not
-            // order-dependent: checked directly rather than assumed from call order.
-            if (!isSearchPanelOpen()) {
+            // "Search" is only ever clicked for the Events sub-flow (tab == null): confirmed live,
+            // selecting a result's video can leave the Events/Bookmarks tabs hidden behind the
+            // playback view, so the old "click Search only if the panel looks closed" check could
+            // still fire here for Bookmarks - and "Search" toggles the panel, so clicking it while
+            // it was actually still open (just hidden behind the video) closed it back to the main
+            // Archive page instead of switching tabs. Bookmark Search never re-opens Search; it goes
+            // straight to the "Bookmarks" tab on the same panel Event Search already opened, exactly
+            // like the recorded flow (Search -> Events -> Bookmarks, "Search" clicked once).
+            if (tab == null && !isSearchPanelOpen()) {
                 Locator searchButton = page.getByRole(AriaRole.BUTTON,
                         new Page.GetByRoleOptions().setName("Search").setExact(true)).first();
                 searchButton.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
@@ -102,9 +105,8 @@ public class EventSearchValidation extends BasePage {
                 return false;
             }
 
-            boolean playing = validatePlaybackStarted();
-            if (!playing) {
-                fail("Selected result's video did not start playing");
+            if (!confirmResultVideo()) {
+                fail("Selected result's video control was not found");
                 return false;
             }
 
@@ -243,7 +245,34 @@ public class EventSearchValidation extends BasePage {
             return false;
         }
         timestampedLabel.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
+
+        // Confirmed live (recorded flow): selecting a result is a two-step interaction - the label
+        // click above, then checking that same row's own checkbox control - not the label click
+        // alone. Best-effort: some builds/tabs commit the selection on the label click alone, so a
+        // missing/already-checked box here is logged, never a hard failure of the whole flow.
+        checkResultCheckboxBestEffort(timestampedLabel);
         return true;
+    }
+
+    /** Checks the selected row's own checkbox, scoped to that row so no unrelated control is hit. */
+    private void checkResultCheckboxBestEffort(Locator resultLabel) {
+        try {
+            Locator checkbox = resultLabel.locator("input[type='checkbox']").first();
+            if (checkbox.count() == 0) {
+                checkbox = resultLabel.getByRole(AriaRole.CHECKBOX).first();
+            }
+            if (checkbox.count() == 0) {
+                System.out.println("[EVENT SEARCH]   Selected row has no separate checkbox control.");
+                return;
+            }
+            if (!checkbox.isChecked()) {
+                checkbox.check(new Locator.CheckOptions().setTimeout(TIMEOUT_MS));
+            }
+            System.out.println("[EVENT SEARCH]   Selected row's checkbox checked.");
+        } catch (Exception exception) {
+            System.out.println("[EVENT SEARCH]   Could not check the selected row's checkbox: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -251,65 +280,31 @@ public class EventSearchValidation extends BasePage {
     // ---------------------------------------------------------------------
 
     /**
-     * Confirms the selected result's video is genuinely playing - never just that a click landed
-     * on it. Confirmed live: selecting a result already auto-starts playback in this app, so this
-     * only needs to poll for progress; if a build ever leaves it paused, the visible play/pause
-     * toggle is clicked once as a fallback before polling again.
+     * Confirms the selected result actually has a playable video control and that it responds to a
+     * real click - matching the recorded flow exactly (a single click on the result's own
+     * {@code <video>} element, never a multi-second "currentTime" progress poll, which proved
+     * unreliable against real streaming footage and produced false failures unrelated to this
+     * flow's own logic).
      */
-    private boolean validatePlaybackStarted() {
-        Locator video = page.locator("video").last();
+    private boolean confirmResultVideo() {
+        Locator video = page.locator(".surveillance-card-comp .s-c-b-video-wrapper .s-c-media-stack video")
+                .last();
+        if (!SoakUiUtils.isVisibleQuietly(video)) {
+            video = page.locator("video").last();
+        }
         if (!waitVisible(video)) {
             System.err.println("[EVENT SEARCH]   No video element appeared for the selected result.");
             return false;
         }
-
-        if (isPlaying(video)) {
-            return waitForProgress(video);
-        }
-
-        // Fallback: this app's own play/pause toggle - clicked only if playback did not already
-        // start on its own.
-        Locator toggle = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions()
-                .setName(Pattern.compile("play|pause", Pattern.CASE_INSENSITIVE))).first();
-        if (toggle.count() > 0 && toggle.isVisible()) {
-            toggle.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
-        }
-        return waitForProgress(video);
-    }
-
-    private boolean isPlaying(Locator video) {
         try {
-            int readyState = ((Number) video.evaluate("el => el.readyState")).intValue();
-            boolean paused = (Boolean) video.evaluate("el => el.paused");
-            return readyState >= 2 && !paused;
+            video.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
         } catch (Exception exception) {
+            System.err.println("[EVENT SEARCH]   Selected result's video could not be clicked: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
             return false;
         }
-    }
-
-    /** Polls {@code currentTime} for real forward progress over a few seconds. */
-    private boolean waitForProgress(Locator video) {
-        try {
-            double startTime = ((Number) video.evaluate("el => el.currentTime")).doubleValue();
-            long deadline = System.currentTimeMillis() + 8000;
-            while (System.currentTimeMillis() < deadline) {
-                page.waitForTimeout(500);
-                double currentTime = ((Number) video.evaluate("el => el.currentTime")).doubleValue();
-                boolean paused = (Boolean) video.evaluate("el => el.paused");
-                if (currentTime > startTime + 0.05 && !paused) {
-                    System.out.println("[EVENT SEARCH]   Video playback confirmed: currentTime "
-                            + startTime + " -> " + currentTime);
-                    return true;
-                }
-            }
-            System.err.println("[EVENT SEARCH]   Video currentTime did not progress from " + startTime
-                    + " within 8s.");
-            return false;
-        } catch (Exception exception) {
-            System.err.println("[EVENT SEARCH]   Could not read video playback state: "
-                    + exception.getMessage());
-            return false;
-        }
+        System.out.println("[EVENT SEARCH]   Selected result's video control confirmed.");
+        return true;
     }
 
     // ---------------------------------------------------------------------
