@@ -4,6 +4,7 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.AriaRole;
 import com.microsoft.playwright.options.WaitForSelectorState;
+import com.vigilx.config.ConfigReader;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,9 +37,20 @@ public class ApplicationHealthPage extends BasePage {
         return page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setName("My license").setExact(true)).isVisible();
     }
 
+    /**
+     * When Device Creation has just onboarded a device (device.details.device.text set), its own
+     * configuration page is already open - reused here as-is, with no navigation back to the
+     * Devices list and no re-selecting any row (which could land on a different device). Otherwise
+     * falls back to the original behaviour: open Devices, click the first Online row.
+     */
     public boolean validateDeviceTabs() {
-        if (!validateDevices()) return false;
-        page.getByText("Online", new Page.GetByTextOptions().setExact(true)).first().click();
+        boolean targetingCreatedDevice =
+                !ConfigReader.getOrDefault("device.details.device.text", "").isBlank()
+                        && page.locator(".device-config-v1-page__body").isVisible();
+        if (!targetingCreatedDevice) {
+            if (!validateDevices()) return false;
+            page.getByText("Online", new Page.GetByTextOptions().setExact(true)).first().click();
+        }
         for (String tab : new String[] {"Streams", "Details", "Recordings", "VA Settings", "Health"}) {
             page.getByRole(AriaRole.TAB, new Page.GetByRoleOptions().setName(tab).setExact(true)).click();
         }

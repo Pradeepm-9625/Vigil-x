@@ -137,11 +137,13 @@ public class ArchiveExportValidation extends BasePage {
                 return false;
             }
 
+            waitForFirstRow();
             Locator previewControl = firstExportPreviewControl();
             if (previewControl == null) {
                 fail("No snapshot record was available to select");
                 return false;
             }
+            rememberRow(firstExportRow());
             previewControl.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
 
             if (!validateSnapshotPreview()) {
@@ -185,6 +187,7 @@ public class ArchiveExportValidation extends BasePage {
                 fail("No snapshot record was available after applying the date filter");
                 return false;
             }
+            rememberRow(firstExportRow());
             filteredPreviewControl.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
 
             if (!validateSnapshotPreview()) {
@@ -358,6 +361,7 @@ public class ArchiveExportValidation extends BasePage {
             if (previewControl.count() == 0) {
                 continue;
             }
+            rememberRow(row);
             try {
                 previewControl.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
                 if (!validatePreview()) {
@@ -425,9 +429,56 @@ public class ArchiveExportValidation extends BasePage {
         return null;
     }
 
-    /** The first available export row's own "Logs" control. */
+    /** Text of the record that was downloaded, so Logs/Delete act on that same record. */
+    private String exportedRowText;
+
+    private static String normalize(String text) {
+        return text == null ? "" : text.replaceAll("\\s+", " ").trim();
+    }
+
+    private void rememberRow(Locator row) {
+        try {
+            exportedRowText = row == null ? null : normalize(row.innerText());
+        } catch (Exception exception) {
+            exportedRowText = null;
+        }
+    }
+
+    /**
+     * The record remembered by {@link #rememberRow} (re-found by its text, never by position), or the
+     * first available row when none was remembered. {@code null} when the remembered record is gone.
+     */
+    private Locator sameExportRow() {
+        if (exportedRowText == null || exportedRowText.isEmpty()) {
+            return firstExportRow();
+        }
+        Locator rows = page.getByRole(AriaRole.ROW);
+        int count = rows.count();
+        for (int i = 0; i < count; i++) {
+            Locator row = rows.nth(i);
+            try {
+                if (row.isVisible() && rowControl(row, "preview").count() > 0
+                        && normalize(row.innerText()).equals(exportedRowText)) {
+                    return row;
+                }
+            } catch (Exception ignored) {
+                // Row re-rendered mid-scan; keep looking.
+            }
+        }
+        return null;
+    }
+
+    /** Bounded wait for the first export record to render after a tab switch. */
+    private void waitForFirstRow() {
+        long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+        while (firstExportRow() == null && System.currentTimeMillis() < deadline) {
+            page.waitForTimeout(300);
+        }
+    }
+
+    /** The downloaded record's own "Logs" control. */
     private Locator firstExportLogsControl() {
-        Locator row = firstExportRow();
+        Locator row = sameExportRow();
         if (row == null) {
             return null;
         }
@@ -691,9 +742,10 @@ public class ArchiveExportValidation extends BasePage {
      * dialogs actually closed afterward.
      */
     private boolean deleteFirstRecord(String confirmationText) {
-        Locator previewControl = firstExportPreviewControl();
+        Locator sameRow = sameExportRow();
+        Locator previewControl = sameRow == null ? null : rowControl(sameRow, "preview");
         if (previewControl == null) {
-            System.err.println("[ARCHIVE EXPORT]   No record available to delete.");
+            System.err.println("[ARCHIVE EXPORT]   The downloaded record is no longer listed; nothing to delete.");
             return false;
         }
         previewControl.click(new Locator.ClickOptions().setTimeout(TIMEOUT_MS));
@@ -714,13 +766,13 @@ public class ArchiveExportValidation extends BasePage {
 
         Locator confirmDialog = page.getByRole(AriaRole.DIALOG)
                 .filter(new Locator.FilterOptions().setHasText(confirmationText))
-                .first();
+                .last(); // innermost: the confirm dialog can be nested inside the preview dialog
         if (!SoakUiUtils.waitVisible(confirmDialog, TIMEOUT_MS)) {
             System.err.println("[ARCHIVE EXPORT]   Delete confirmation dialog not found.");
             return false;
         }
         Locator confirmDelete = confirmDialog.getByRole(AriaRole.BUTTON,
-                new Locator.GetByRoleOptions().setName("Delete").setExact(true)).first();
+                new Locator.GetByRoleOptions().setName("Delete").setExact(true)).last();
         if (!SoakUiUtils.waitVisible(confirmDelete, TIMEOUT_MS)) {
             System.err.println("[ARCHIVE EXPORT]   Confirmation dialog's own 'Delete' button not found.");
             return false;

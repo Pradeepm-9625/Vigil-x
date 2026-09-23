@@ -148,6 +148,32 @@ public final class SoakHealthCheckRunner {
                 }
             }
 
+            // Device Creation: Devices -> Add Devices -> Add Device Manually -> connection details ->
+            // Test Connection -> onboarding details -> Save changes. Runs right after Dashboard,
+            // before the existing Devices / Device Tabs / Device Details checks below, none of which
+            // are modified - it only navigates to the Devices list and leaves it exactly where those
+            // checks already expect to find it. Config-gated; additive.
+            // Captured only when Device Creation below truly succeeds - every later step that reads
+            // this (targeting Device Details, then Decommission) is gated on it being non-blank, so
+            // nothing here can ever act on an arbitrary/pre-existing device.
+            String createdDeviceName = "";
+            if (Boolean.parseBoolean(ConfigReader.getOrDefault("soak.enable.device.creation", "true"))) {
+                DeviceDetailsValidation deviceCreation = new DeviceDetailsValidation(page);
+                validatePage(page, result, "Device Creation", () -> deviceCreation.createDevice(appUrl));
+                // Point the existing Device Details targeting knob (device.details.device.text,
+                // already read by DeviceDetailsValidation.open() - unmodified) at the device just
+                // onboarded, so the existing Devices/Device Tabs/Device Details checks below open
+                // and validate THAT device rather than an arbitrary Online row. Only when creation
+                // truly succeeded and a name was captured; otherwise the checks below keep their
+                // existing behavior untouched.
+                if ("PASS".equals(result.pageResults.get("Device Creation"))
+                        && !deviceCreation.lastCreatedDeviceName().isBlank()) {
+                    createdDeviceName = deviceCreation.lastCreatedDeviceName();
+                    System.setProperty("device.details.device.text", createdDeviceName);
+                    LOG.info("[SOAK] Device Details will target the newly onboarded device: {}", createdDeviceName);
+                }
+            }
+
             validatePage(page, result, "Devices", healthPages::validateDevices);
             validatePage(page, result, "Device Tabs", healthPages::validateDeviceTabs);
             // Deep Device Details validation: open one device and walk every tab (Details,
@@ -162,6 +188,18 @@ public final class SoakHealthCheckRunner {
                                 () -> deviceDetails.validateSection(section));
                     }
                 }
+            }
+
+            // Device Decommission: cleans up the device Device Creation onboarded above, once every
+            // Device Details tab check above has run, before Master Configuration begins. Gated
+            // strictly on createdDeviceName being non-blank (only ever set when Device Creation
+            // truly succeeded this run) - this can never decommission an arbitrary/pre-existing
+            // device. Config-gated (same flag as Device Creation); additive.
+            if (!createdDeviceName.isBlank()) {
+                DeviceDetailsValidation deviceDecommission = new DeviceDetailsValidation(page);
+                final String deviceNameToDecommission = createdDeviceName;
+                validatePage(page, result, "Device Decommission",
+                        () -> deviceDecommission.decommissionDevice(appUrl, deviceNameToDecommission));
             }
 
             // Master Configuration: create/rename/remove + tab configuration. Runs after Device
@@ -270,11 +308,19 @@ public final class SoakHealthCheckRunner {
                 // config-gated; independent of UsersRolesPage, which it does not modify.
                 if (config.roleCreationEnabled()) {
                     RolesPage roles = new RolesPage(page);
-                    RoleData newRole = new RoleData(
-                            ConfigReader.getOrDefault("role.creation.name", "Testing role"), true);
+                    // Unique per run (config value + timestamp), same convention as Group creation
+                    // below: a static name collides with the role left by an earlier run and makes
+                    // the create fail as a duplicate. Base capped to 13 characters so base + space +
+                    // 6-digit suffix + the "-update" rename suffix all still fit a 30-character field.
+                    String roleMillis = String.format("%06d", (System.currentTimeMillis() / 1000) % 1_000_000);
+                    String roleBase = ConfigReader.getOrDefault("role.creation.name", "Testing role");
+                    if (roleBase.length() > 13) {
+                        roleBase = roleBase.substring(0, 13).trim();
+                    }
+                    String uniqueRoleName = roleBase + " " + roleMillis.substring(roleMillis.length() - 6);
+                    RoleData newRole = new RoleData(uniqueRoleName, true);
                     RoleData updatedRole = new RoleData(
-                            ConfigReader.getOrDefault("role.creation.name", "Testing role")
-                                    + ConfigReader.getOrDefault("role.update.name.suffix", "-update"),
+                            uniqueRoleName + ConfigReader.getOrDefault("role.update.name.suffix", "-update"),
                             true);
                     validatePage(page, result, "Users & Roles - Role Lifecycle",
                             () -> roles.runRoleLifecycle(newRole, updatedRole));

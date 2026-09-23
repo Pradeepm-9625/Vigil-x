@@ -60,11 +60,737 @@ public class DeviceDetailsValidation extends BasePage {
     private final Path screenshotDirectory;
     private final int streamMonitorSeconds;
 
+    /** The unique camera name {@link #createDevice} generated for its last successful run - never a
+     *  hard-coded value; blank until a device has actually been created. */
+    private String lastCreatedDeviceName = "";
+
     public DeviceDetailsValidation(Page page) {
         super(page);
         this.screenshotDirectory = Paths.get(ConfigReader.getOrDefault(
                 "device.details.screenshot.directory", DEFAULT_SCREENSHOT_DIRECTORY));
         this.streamMonitorSeconds = Math.max(2, intConfig("device.details.stream.monitor.seconds", 8));
+    }
+
+    /** The camera name from the last successful {@link #createDevice} call (blank if none yet). */
+    public String lastCreatedDeviceName() {
+        return lastCreatedDeviceName;
+    }
+
+    // ---------------------------------------------------------------------
+    // Create
+    // ---------------------------------------------------------------------
+
+    /**
+     * Devices -&gt; "Add Devices" -&gt; "Add Device Manually": fills the connection details
+     * (Device IP / HTTP Port / RTSP Port / Username / Password), runs "Test Connection", confirms
+     * the device type is detected, best-effort opens/closes the live preview, saves the connection
+     * step, then completes onboarding (Camera Name / "Sync with computer time" / Site) and saves
+     * again, then confirms the resulting dialog's own "Open Device Settings" and clicks it. Every
+     * value is read from config ({@code device.creation.*}) - never hard-coded here - and the camera
+     * name gets a per-run unique timestamp suffix appended in code, the same convention already used
+     * for user/group/role creation, so repeated runs never collide on name.
+     *
+     * <p>Reached straight from the Dashboard, before the existing Devices / Device Tabs / Device
+     * Details checks. On success this leaves the page already open on the new device's own
+     * configuration page - {@link #open} already reuses whatever device configuration page is
+     * currently on screen (its {@code isOnDeviceConfigPage()} check), so the existing Device Details
+     * walk that runs afterward opens straight into this device instead of navigating back to the
+     * Devices list, with no change needed to {@link #open} itself. Contract: never throws into the
+     * caller; every failure is logged, screenshotted, and returned as {@code false} so the soak
+     * continues to the existing checks regardless.
+     */
+    public boolean createDevice(String baseUrl) {
+        try {
+            System.out.println(SEP);
+            System.out.println("DEVICE CREATION - onboarding a new device");
+            System.out.println(SEP);
+
+            if (!navigateToDevicesList(baseUrl)) {
+                capture("device-creation-devices-list-not-open");
+                return false;
+            }
+
+            if (!openAddDeviceManually()) {
+                capture("device-creation-add-device-manually-not-open");
+                return false;
+            }
+
+            if (!fillConnectionDetails()) {
+                capture("device-creation-connection-details-failed");
+                return false;
+            }
+
+            if (!testConnection()) {
+                capture("device-creation-test-connection-failed");
+                return false;
+            }
+
+            previewLiveStreamBestEffort();
+
+            if (!clickSaveChanges("connection details")) {
+                capture("device-creation-connection-save-failed");
+                return false;
+            }
+
+            String cameraName = uniqueDeviceName();
+            if (!completeOnboardingDetails(cameraName)) {
+                capture("device-creation-onboarding-details-failed");
+                return false;
+            }
+
+            if (!clickSaveChanges("onboarding details")) {
+                capture("device-creation-onboarding-save-failed");
+                return false;
+            }
+
+            if (!openDeviceSettingsFromConfirmation()) {
+                capture("device-creation-open-device-settings-failed");
+                return false;
+            }
+
+            lastCreatedDeviceName = cameraName;
+            System.out.println("[DEVICE CREATION] Device '" + cameraName
+                    + "' onboarding completed and its Device Settings page is now open.");
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[DEVICE CREATION] Create device flow error: " + firstLine(exception.getMessage()));
+            capture("device-creation-exception");
+            return false;
+        }
+    }
+
+    /**
+     * Devices list only (no device opened) - goes straight to "Devices", same end state
+     * {@link #open} itself reaches. In the soak run this is called right after Project Hierarchy has
+     * already been validated (see {@link com.vigilx.soak.SoakHealthCheckRunner}), so it no longer
+     * pre-clicks "Dashboard" then "Project Hierarchy" first - doing so only re-visited pages the
+     * caller had just finished checking, a duplicate navigation with no effect on the end state
+     * (Devices list open, "Add Devices" visible) that {@link #createDevice} actually needs. Used
+     * only by {@link #createDevice}.
+     */
+    private boolean navigateToDevicesList(String baseUrl) {
+        try {
+            Locator devicesLink = page.getByRole(AriaRole.LINK,
+                    new Page.GetByRoleOptions().setName("Devices").setExact(false)).first();
+            if (SoakUiUtils.waitVisible(devicesLink, ELEMENT_TIMEOUT_MS)) {
+                devicesLink.click(new Locator.ClickOptions().setTimeout(10000));
+            } else {
+                navigateTo(baseUrl + "/devices");
+            }
+        } catch (Exception ignored) {
+            navigateTo(baseUrl + "/devices");
+        }
+        waitAfterPageNavigation();
+        Locator addDevices = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Add Devices").setExact(false)).first();
+        boolean ready = SoakUiUtils.waitVisible(addDevices, SHELL_TIMEOUT_MS);
+        System.out.println("[DEVICE CREATION] Devices list opened: " + (ready ? "YES" : "NO"));
+        return ready;
+    }
+
+    /** "Add Devices" -&gt; "Add Device Manually", waits for the Device IP field to render. */
+    private boolean openAddDeviceManually() {
+        Locator addDevices = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Add Devices").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(addDevices, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE CREATION] 'Add Devices' button not found.");
+            return false;
+        }
+        addDevices.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+
+        Locator addManually = page.getByRole(AriaRole.MENUITEM,
+                new Page.GetByRoleOptions().setName("Add Device Manually").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(addManually, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE CREATION] 'Add Device Manually' menu item not found.");
+            return false;
+        }
+        addManually.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+
+        Locator deviceIp = page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName("Device IP").setExact(false)).first();
+        boolean formOpen = SoakUiUtils.waitVisible(deviceIp, ELEMENT_TIMEOUT_MS);
+        System.out.println("[DEVICE CREATION] 'Add Device Manually' form opened: " + (formOpen ? "YES" : "NO"));
+        return formOpen;
+    }
+
+    /** Device IP / HTTP Port / RTSP Port, then (expanding "Credentials information" if needed)
+     *  Username / Password - every value from {@code device.creation.*} config. */
+    private boolean fillConnectionDetails() {
+        Locator deviceIp = page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName("Device IP").setExact(false)).first();
+        if (!fillField(deviceIp, ConfigReader.getOrDefault("device.creation.ip", ""), "Device IP")) {
+            return false;
+        }
+
+        Locator httpPort = page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName("HTTP Port").setExact(false)).first();
+        fillField(httpPort, ConfigReader.getOrDefault("device.creation.http.port", ""), "HTTP Port");
+
+        Locator rtspPort = page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName("RTSP Port").setExact(false)).first();
+        fillField(rtspPort, ConfigReader.getOrDefault("device.creation.rtsp.port", ""), "RTSP Port");
+
+        Locator username = page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName("Username").setExact(false)).first();
+        if (!SoakUiUtils.isVisibleQuietly(username)) {
+            // "Credentials information" is a collapsible section header in the recording - expand it
+            // only when Username is not already visible, never assumed collapsed.
+            Locator credentialsSection = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Credentials information").setExact(false)).first();
+            if (SoakUiUtils.isVisibleQuietly(credentialsSection)) {
+                try {
+                    credentialsSection.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                    page.waitForTimeout(500);
+                } catch (Exception exception) {
+                    System.out.println("[DEVICE CREATION]   'Credentials information' could not be clicked: "
+                            + firstLine(exception.getMessage()));
+                }
+            }
+        }
+        boolean userOk = fillField(username, ConfigReader.getOrDefault("device.creation.username", ""), "Username");
+
+        Locator password = page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName("Password").setExact(false)).first();
+        boolean passOk = fillField(password, ConfigReader.getOrDefault("device.creation.password", ""), "Password");
+
+        return userOk && passOk;
+    }
+
+    private boolean fillField(Locator field, String value, String label) {
+        if (value == null || value.isBlank()) {
+            System.out.println("[DEVICE CREATION]   '" + label + "' has no configured value; skipping.");
+            return false;
+        }
+        if (!SoakUiUtils.waitVisible(field, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE CREATION]   '" + label + "' field not found.");
+            return false;
+        }
+        try {
+            field.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            field.fill(value);
+            System.out.println("[DEVICE CREATION]   '" + label + "' filled.");
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[DEVICE CREATION]   '" + label + "' could not be filled: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+    }
+
+    /** "Test Connection" -&gt; confirms the app reports a detected device type. */
+    private boolean testConnection() {
+        Locator testConnection = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Test Connection").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(testConnection, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE CREATION] 'Test Connection' button not found.");
+            return false;
+        }
+        testConnection.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+
+        Locator detected = page.getByText(Pattern.compile("this device is a", Pattern.CASE_INSENSITIVE)).first();
+        boolean connected = SoakUiUtils.waitVisible(detected, 20000);
+        System.out.println("[DEVICE CREATION] Test Connection result: "
+                + (connected ? "device type detected" : "no device type detected within 20s"));
+        return connected;
+    }
+
+    /** Best-effort: opens the live preview, clicks the video once, then closes it. Never fails the flow. */
+    private void previewLiveStreamBestEffort() {
+        Locator openPreview = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Open live preview").setExact(false)).first();
+        if (!SoakUiUtils.isVisibleQuietly(openPreview)) {
+            System.out.println("[DEVICE CREATION]   'Open live preview' not present; skipping.");
+            return;
+        }
+        try {
+            openPreview.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            Locator video = page.locator("video").first();
+            if (SoakUiUtils.waitVisible(video, ELEMENT_TIMEOUT_MS)) {
+                video.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            }
+            Locator closePreview = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Close live preview").setExact(false)).first();
+            if (SoakUiUtils.isVisibleQuietly(closePreview)) {
+                closePreview.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            }
+            System.out.println("[DEVICE CREATION]   Live preview checked.");
+        } catch (Exception exception) {
+            System.out.println("[DEVICE CREATION]   Live preview could not be probed; skipping: "
+                    + firstLine(exception.getMessage()));
+        }
+    }
+
+    /** Camera Name (select-all -&gt; replace) / "Sync with computer time" / Site - all from config. */
+    private boolean completeOnboardingDetails(String cameraName) {
+        Locator cameraNameField = page.getByRole(AriaRole.TEXTBOX,
+                new Page.GetByRoleOptions().setName("Camera Name").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(cameraNameField, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE CREATION] 'Camera Name' field not found.");
+            return false;
+        }
+        try {
+            cameraNameField.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS).setClickCount(3));
+            cameraNameField.fill(cameraName);
+            System.out.println("[DEVICE CREATION]   Camera Name set to '" + cameraName + "'.");
+        } catch (Exception exception) {
+            System.err.println("[DEVICE CREATION]   'Camera Name' could not be filled: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        checkSyncWithComputerTime();
+
+        selectSiteBestEffort();
+        return true;
+    }
+
+    /**
+     * Checks "Sync with computer time" - matches the recorded interaction exactly: click the
+     * "Sync with computer time" text label first (this toggles the state in the app, per the
+     * recording), then confirm via the accessible checkbox and only call {@code check()} if it
+     * still reads unchecked. Falls back to the visible {@code .chk__box} control (scoped to the
+     * label's own row, never a page-wide first match) when the label itself is not clickable on a
+     * given build - confirmed live, the real {@code role=checkbox} input can be visually hidden
+     * behind that custom control. Best-effort: logged, never fails the overall onboarding flow.
+     */
+    private void checkSyncWithComputerTime() {
+        Locator label = page.getByText("Sync with computer time", new Page.GetByTextOptions().setExact(false)).first();
+        Locator syncTime = page.getByRole(AriaRole.CHECKBOX,
+                new Page.GetByRoleOptions().setName("Sync with computer time").setExact(false)).first();
+        try {
+            if (SoakUiUtils.isVisibleQuietly(label)) {
+                label.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                page.waitForTimeout(300);
+            } else if (label.count() > 0) {
+                // Scoped to the label's own row/container so a page-wide ".chk__box" match never
+                // lands on an unrelated checkbox elsewhere on the same form.
+                Locator visibleBox = label.locator("xpath=ancestor::*[self::label or self::div][1]")
+                        .locator(".chk__box").first();
+                if (SoakUiUtils.isVisibleQuietly(visibleBox)) {
+                    visibleBox.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                    page.waitForTimeout(300);
+                }
+            }
+
+            boolean checked = SoakUiUtils.isVisibleQuietly(syncTime) && syncTime.isChecked();
+            if (!checked && SoakUiUtils.isVisibleQuietly(syncTime)) {
+                syncTime.check(new Locator.CheckOptions().setTimeout(ELEMENT_TIMEOUT_MS).setForce(true));
+                checked = syncTime.isChecked();
+            }
+            System.out.println("[DEVICE CREATION]   'Sync with computer time' checked: " + checked);
+        } catch (Exception exception) {
+            System.out.println("[DEVICE CREATION]   'Sync with computer time' could not be checked: "
+                    + firstLine(exception.getMessage()));
+        }
+    }
+
+    /**
+     * Opens the Site dropdown and picks one of whatever options it currently lists, at random -
+     * confirmed live, the option list carries a leading "None" (reset) entry alongside the real
+     * site names, so that one is always excluded from the random pick. Never a fixed
+     * {@code device.creation.site} name, which can go stale (renamed/deleted site). If selecting the
+     * first level reveals a second, still-unlabelled dropdown (a nested site/zone selector, per the
+     * recorded flow), that one is opened and given the same random pick. Best-effort throughout: a
+     * missing control or empty option list is logged, never a hard failure of the whole onboarding
+     * flow.
+     */
+    private void selectSiteBestEffort() {
+        Locator siteCombobox = page.getByRole(AriaRole.COMBOBOX)
+                .filter(new Locator.FilterOptions().setHasText("Select Site")).first();
+        if (!SoakUiUtils.isVisibleQuietly(siteCombobox)) {
+            System.out.println("[DEVICE CREATION]   'Select Site' control not found; skipping.");
+            return;
+        }
+        if (!chooseRandomComboboxOption(siteCombobox, "Site")) {
+            return;
+        }
+
+        // A nested site/zone selector, when present, renders as a second combobox that has not yet
+        // shown any selected text - scoped by that empty state rather than a fixed list position.
+        Locator nestedCombobox = page.getByRole(AriaRole.COMBOBOX)
+                .filter(new Locator.FilterOptions().setHasText(Pattern.compile("^\\s*$"))).first();
+        if (!SoakUiUtils.isVisibleQuietly(nestedCombobox)) {
+            System.out.println("[DEVICE CREATION]   No nested site/zone control found; skipping.");
+            return;
+        }
+        chooseRandomComboboxOption(nestedCombobox, "Site (nested)");
+    }
+
+    /** Opens {@code combobox} and clicks a random real option (never the "None" reset entry). */
+    private boolean chooseRandomComboboxOption(Locator combobox, String label) {
+        try {
+            combobox.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(600);
+
+            Locator option = randomComboboxOption();
+            if (option == null) {
+                System.out.println("[DEVICE CREATION]   " + label
+                        + " dropdown listed no selectable option (besides 'None').");
+                page.keyboard().press("Escape");
+                return false;
+            }
+            String chosen = option.innerText().trim();
+            option.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(400);
+            System.out.println("[DEVICE CREATION]   " + label + " selected (random): '" + chosen + "'.");
+            return true;
+        } catch (Exception exception) {
+            System.out.println("[DEVICE CREATION]   " + label + " selection failed: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+    }
+
+    /**
+     * One visible, real option from the currently open dropdown, picked at random - excluding a
+     * plain "None" reset entry. Confirmed live: this app's dropdowns (Site included) render their
+     * options through a shared {@code .vxdd__menu}/{@code .vxdd__item} portal component - the same
+     * "vxdd" prefix already used elsewhere in this class for the "More Actions" menu - rather than
+     * {@code role=listbox}/{@code option} semantics, so that markup is checked first; role-based
+     * scanning (scoped to an actual {@code role=listbox} popup, never a bare page-wide button role)
+     * remains as a fallback for any build/dropdown that does expose proper listbox roles.
+     */
+    private Locator randomComboboxOption() {
+        Locator vxddMenu = page.locator(".vxdd__menu").first();
+        Locator items;
+        if (SoakUiUtils.isVisibleQuietly(vxddMenu)) {
+            items = vxddMenu.locator(".vxdd__item");
+        } else {
+            Locator listbox = page.getByRole(AriaRole.LISTBOX).first();
+            items = SoakUiUtils.isVisibleQuietly(listbox)
+                    ? listbox.getByRole(AriaRole.OPTION).or(listbox.getByRole(AriaRole.MENUITEM))
+                            .or(listbox.getByRole(AriaRole.BUTTON))
+                    : page.getByRole(AriaRole.OPTION).or(page.getByRole(AriaRole.MENUITEM));
+        }
+        int count = Math.min(items.count(), 40);
+        java.util.List<Locator> visible = new java.util.ArrayList<>();
+        for (int index = 0; index < count; index++) {
+            Locator item = items.nth(index);
+            try {
+                if (!item.isVisible()) {
+                    continue;
+                }
+                String text = item.innerText().trim();
+                if (!text.isBlank() && !text.equalsIgnoreCase("None")) {
+                    visible.add(item);
+                }
+            } catch (Exception ignored) {
+                // skip
+            }
+        }
+        if (visible.isEmpty()) {
+            return null;
+        }
+        return visible.get(new java.util.Random().nextInt(visible.size()));
+    }
+
+    /**
+     * "Save changes", confirmed by the button itself disappearing/becoming unavailable. Matches the
+     * recorded onboarding-details step, which clicks "Save changes" twice in a row - here, a second
+     * click is fired only when the same button is still visible after the first (a no-op, never an
+     * extra failure, whenever one click was already enough).
+     */
+    private boolean clickSaveChanges(String step) {
+        Locator save = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Save changes").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(save, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE CREATION] 'Save changes' (" + step + ") button not found.");
+            return false;
+        }
+        try {
+            save.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(1200);
+            if (SoakUiUtils.isVisibleQuietly(save)) {
+                save.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                page.waitForTimeout(1200);
+                System.out.println("[DEVICE CREATION]   'Save changes' (" + step + ") clicked twice"
+                        + " (still visible after the first click).");
+            } else {
+                System.out.println("[DEVICE CREATION]   'Save changes' (" + step + ") clicked.");
+            }
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[DEVICE CREATION]   'Save changes' (" + step + ") could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+    }
+
+    /**
+     * Confirms the dialog that follows the final "Save changes" (best-effort click on the dialog
+     * itself first, matching the recorded interaction) and clicks its own "Open Device Settings"
+     * control, then waits for the device configuration shell to render - the same shell
+     * {@link #open} itself waits for, so a caller running the Device Details walk right afterward
+     * finds the page in exactly the state it already expects.
+     */
+    private boolean openDeviceSettingsFromConfirmation() {
+        Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+        if (SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
+            try {
+                dialog.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            } catch (Exception exception) {
+                System.out.println("[DEVICE CREATION]   Confirmation dialog could not be clicked (non-fatal): "
+                        + firstLine(exception.getMessage()));
+            }
+        }
+
+        // "Open Device Settings" is checked directly, page-wide, before requiring a role=dialog
+        // wrapper: some builds render this confirmation as a non-<dialog> popup (same "vxdd"/custom
+        // component pattern already confirmed elsewhere on this page), so gating on role=dialog
+        // first could miss a real, clickable confirmation.
+        Locator openSettings = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Open Device Settings").setExact(false)).first();
+        if (SoakUiUtils.waitVisible(openSettings, ELEMENT_TIMEOUT_MS)) {
+            return clickOpenDeviceSettings(openSettings);
+        }
+
+        if (SoakUiUtils.isVisibleQuietly(dialog)) {
+            openSettings = dialog.getByRole(AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("Open Device Settings").setExact(false)).first();
+            if (SoakUiUtils.waitVisible(openSettings, ELEMENT_TIMEOUT_MS)) {
+                return clickOpenDeviceSettings(openSettings);
+            }
+        }
+
+        System.err.println("[DEVICE CREATION] 'Open Device Settings' control not found after Save changes.");
+        return false;
+    }
+
+    private boolean clickOpenDeviceSettings(Locator openSettings) {
+        if (!SoakUiUtils.waitVisible(openSettings, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE CREATION] 'Open Device Settings' button not found.");
+            return false;
+        }
+
+        try {
+            openSettings.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            waitAfterPageNavigation();
+        } catch (Exception exception) {
+            System.err.println("[DEVICE CREATION] 'Open Device Settings' could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        boolean opened = SoakUiUtils.waitVisible(
+                page.locator(PAGE_BODY + ", " + TAB_CONTENT).first(), SHELL_TIMEOUT_MS);
+        System.out.println("[DEVICE CREATION]   'Open Device Settings' clicked; device configuration page open: "
+                + (opened ? "YES" : "NO"));
+        return opened;
+    }
+
+    /** {@code device.creation.name} plus a 6-digit epoch-second suffix, same convention as
+     *  user/group/role creation, so repeated runs never collide on name. */
+    private String uniqueDeviceName() {
+        String base = ConfigReader.getOrDefault("device.creation.name", "Soak test device");
+        String suffix = String.format("%06d", (System.currentTimeMillis() / 1000) % 1_000_000);
+        return base + " " + suffix;
+    }
+
+    // ---------------------------------------------------------------------
+    // Decommission
+    // ---------------------------------------------------------------------
+
+    /**
+     * Cleans up after the Device Details tab walk finishes: "Back to devices" -&gt; find the row for
+     * {@code deviceName} -&gt; open its own actions menu -&gt; "Decommission Device" -&gt; type the
+     * required "Decommission" confirmation text -&gt; confirm.
+     *
+     * <p>{@code deviceName} is required and never inferred - the caller (only
+     * {@link com.vigilx.soak.SoakHealthCheckRunner}) passes the exact unique name
+     * {@link #createDevice} generated, so this can only ever decommission the device this same run
+     * created, never an arbitrary/pre-existing one. A blank name is refused outright as a safety
+     * gate. Contract: never throws into the caller; every failure is logged, screenshotted, and
+     * returned as {@code false} so the soak continues to whatever runs after it (e.g. Master
+     * Configuration, left untouched).
+     */
+    public boolean decommissionDevice(String baseUrl, String deviceName) {
+        if (deviceName == null || deviceName.isBlank()) {
+            System.err.println("[DEVICE DECOMMISSION] No device name given; refusing to decommission "
+                    + "anything (safety gate - this only ever removes a device this run created).");
+            return false;
+        }
+        try {
+            System.out.println(SEP);
+            System.out.println("DEVICE DECOMMISSION - removing '" + deviceName + "'");
+            System.out.println(SEP);
+
+            // Defensive: clears any stray modal left open by whatever ran immediately before this
+            // (e.g. the Device Details tab walk's own dialogs) so it can never block the navigation
+            // below - the same closeOpenDialogs() the tab walk already uses between its own tabs.
+            closeOpenDialogs();
+
+            if (!backToDevicesList(baseUrl)) {
+                capture("device-decommission-devices-list-not-open");
+                return false;
+            }
+
+            Locator deviceRow = findDeviceRow(deviceName);
+            if (deviceRow == null) {
+                System.err.println("[DEVICE DECOMMISSION] Row for '" + deviceName + "' not found.");
+                capture("device-decommission-row-not-found");
+                return false;
+            }
+            try {
+                deviceRow.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            } catch (Exception exception) {
+                System.out.println("[DEVICE DECOMMISSION]   Row click skipped (non-fatal): "
+                        + firstLine(exception.getMessage()));
+            }
+
+            if (!openDecommissionDeviceOption(deviceRow)) {
+                capture("device-decommission-menu-item-not-found");
+                return false;
+            }
+
+            if (!confirmDecommission()) {
+                capture("device-decommission-confirm-failed");
+                return false;
+            }
+
+            System.out.println("[DEVICE DECOMMISSION] Device '" + deviceName + "' decommissioned.");
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DECOMMISSION] Decommission flow error: " + firstLine(exception.getMessage()));
+            capture("device-decommission-exception");
+            return false;
+        }
+    }
+
+    /** "Back to devices" when present (leaving a device's own settings page); otherwise the Devices list link. */
+    private boolean backToDevicesList(String baseUrl) {
+        Locator back = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Back to devices").setExact(false)).first();
+        if (SoakUiUtils.isVisibleQuietly(back)) {
+            try {
+                back.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                waitAfterPageNavigation();
+            } catch (Exception exception) {
+                System.out.println("[DEVICE DECOMMISSION]   'Back to devices' could not be clicked: "
+                        + firstLine(exception.getMessage()));
+            }
+        } else {
+            try {
+                page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName("Devices").setExact(false))
+                        .first().click(new Locator.ClickOptions().setTimeout(10000));
+                waitAfterPageNavigation();
+            } catch (Exception ignored) {
+                navigateTo(baseUrl + "/devices");
+                waitAfterPageNavigation();
+            }
+        }
+        Locator addDevices = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Add Devices").setExact(false)).first();
+        boolean ready = SoakUiUtils.waitVisible(addDevices, SHELL_TIMEOUT_MS);
+        System.out.println("[DEVICE DECOMMISSION] Devices list opened: " + (ready ? "YES" : "NO"));
+        return ready;
+    }
+
+    /** The Devices list row whose text contains {@code deviceName} - never a fixed row position. */
+    private Locator findDeviceRow(String deviceName) {
+        Locator match = page.getByText(deviceName, new Page.GetByTextOptions().setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(match, SHELL_TIMEOUT_MS)) {
+            return null;
+        }
+        return match;
+    }
+
+    /**
+     * Opens {@code deviceRow}'s own actions control and clicks "Decommission Device" - scoped to the
+     * row first (a per-row menu trigger), falling back to a page-wide combobox/button lookup for a
+     * build whose trigger sits outside the row's own DOM subtree (same portal pattern already
+     * confirmed elsewhere in this class).
+     */
+    private boolean openDecommissionDeviceOption(Locator deviceRow) {
+        Locator trigger = deviceRow.locator("xpath=ancestor::*[self::tr or self::li or self::div][1]")
+                .getByRole(AriaRole.COMBOBOX).first();
+        if (trigger.count() == 0 || !SoakUiUtils.isVisibleQuietly(trigger)) {
+            trigger = page.getByRole(AriaRole.COMBOBOX).first();
+        }
+        if (SoakUiUtils.isVisibleQuietly(trigger)) {
+            try {
+                trigger.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                page.waitForTimeout(400);
+            } catch (Exception exception) {
+                System.out.println("[DEVICE DECOMMISSION]   Row actions trigger could not be clicked: "
+                        + firstLine(exception.getMessage()));
+            }
+        }
+
+        Locator decommission = page.getByRole(AriaRole.BUTTON,
+                        new Page.GetByRoleOptions().setName("Decommission Device").setExact(false))
+                .or(page.getByRole(AriaRole.MENUITEM,
+                        new Page.GetByRoleOptions().setName("Decommission Device").setExact(false)))
+                .first();
+        if (!SoakUiUtils.waitVisible(decommission, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE DECOMMISSION] 'Decommission Device' option not found.");
+            return false;
+        }
+        try {
+            decommission.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DECOMMISSION] 'Decommission Device' could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+    }
+
+    /**
+     * The confirmation dialog: types the required "Decommission" text into its own
+     * {@code To confirm, type "..."} textbox, then clicks the dialog's own "Decommission Device"
+     * button (scoped to the dialog, never the earlier menu item).
+     */
+    private boolean confirmDecommission() {
+        Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+        if (!SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE DECOMMISSION] Confirmation dialog did not open.");
+            return false;
+        }
+
+        Locator confirmField = dialog.getByRole(AriaRole.TEXTBOX,
+                new Locator.GetByRoleOptions().setName(Pattern.compile("to confirm, type",
+                        Pattern.CASE_INSENSITIVE))).first();
+        if (!SoakUiUtils.waitVisible(confirmField, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE DECOMMISSION] Confirmation textbox not found.");
+            return false;
+        }
+        try {
+            confirmField.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            confirmField.fill("Decommission");
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DECOMMISSION] Confirmation textbox could not be filled: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        Locator confirmButton = dialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName("Decommission Device").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(confirmButton, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[DEVICE DECOMMISSION] Dialog's own 'Decommission Device' button not found.");
+            return false;
+        }
+        try {
+            confirmButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DECOMMISSION] Dialog's 'Decommission Device' could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        boolean closed = SoakUiUtils.waitVisible(dialog, 1000) ? waitForDialogClosed(dialog) : true;
+        System.out.println("[DEVICE DECOMMISSION]   Confirmation dialog closed: " + closed);
+        return closed;
+    }
+
+    private boolean waitForDialogClosed(Locator dialog) {
+        long deadline = System.currentTimeMillis() + SHELL_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            if (!SoakUiUtils.isVisibleQuietly(dialog)) {
+                return true;
+            }
+            page.waitForTimeout(300);
+        }
+        return !SoakUiUtils.isVisibleQuietly(dialog);
     }
 
     // ---------------------------------------------------------------------
@@ -82,10 +808,16 @@ public class DeviceDetailsValidation extends BasePage {
             System.out.println("DEVICE DETAILS VALIDATION - opening a device");
             System.out.println(SEP);
 
-            // No duplicate navigation: the run reaches this straight after the existing "Device
-            // Tabs" check, which already left a device configuration page open. Reuse it instead
-            // of navigating back to the Devices list and re-opening a device.
-            if (isOnDeviceConfigPage()) {
+            String deviceText = ConfigReader.getOrDefault("device.details.device.text", "").trim();
+
+            // No duplicate navigation: when no specific device is targeted, the run reaches this
+            // straight after the existing "Device Tabs" check, which already left A device
+            // configuration page open - reuse it instead of navigating back to the Devices list.
+            // Confirmed live: this shortcut must NEVER fire when a specific device IS targeted
+            // (deviceText non-blank, e.g. right after Device Creation) - "Device Tabs" can leave a
+            // DIFFERENT device's page open (whichever the list shows first as Online), and reusing
+            // it silently validated the wrong device instead of the one just onboarded.
+            if (deviceText.isBlank() && isOnDeviceConfigPage()) {
                 System.out.println("[DEVICE DETAILS] Already on a device configuration page; reusing it.");
                 return true;
             }
@@ -104,17 +836,22 @@ public class DeviceDetailsValidation extends BasePage {
             online.first().waitFor(new Locator.WaitForOptions()
                     .setState(WaitForSelectorState.VISIBLE).setTimeout(SHELL_TIMEOUT_MS));
 
-            String deviceText = ConfigReader.getOrDefault("device.details.device.text", "").trim();
             Locator deviceRow;
             if (deviceText.isBlank()) {
                 deviceRow = online.first();
             } else {
+                // A specific device is targeted: never substitute a different one. A previous
+                // version fell back to "the first Online device" here when the named row could not
+                // be found - silently validating/decommissioning a random device instead of the one
+                // just onboarded. Now this is a hard failure instead.
                 Locator named = page.getByText(deviceText, new Page.GetByTextOptions().setExact(false)).first();
-                deviceRow = named.count() > 0 ? named : online.first();
-                if (named.count() == 0) {
+                if (!SoakUiUtils.waitVisible(named, SHELL_TIMEOUT_MS)) {
                     System.err.println("[DEVICE DETAILS] Row '" + deviceText
-                            + "' not found; opening the first Online device instead.");
+                            + "' not found; refusing to fall back to a different device.");
+                    capture("device-details-target-row-not-found");
+                    return false;
                 }
+                deviceRow = named;
             }
 
             deviceRow.click(new Locator.ClickOptions().setTimeout(10000));
