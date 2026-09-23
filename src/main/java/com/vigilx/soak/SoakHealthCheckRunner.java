@@ -308,11 +308,19 @@ public final class SoakHealthCheckRunner {
                 // config-gated; independent of UsersRolesPage, which it does not modify.
                 if (config.roleCreationEnabled()) {
                     RolesPage roles = new RolesPage(page);
-                    RoleData newRole = new RoleData(
-                            ConfigReader.getOrDefault("role.creation.name", "Testing role"), true);
+                    // Unique per run (config value + timestamp), same convention as Group creation
+                    // below: a static name collides with the role left by an earlier run and makes
+                    // the create fail as a duplicate. Base capped to 13 characters so base + space +
+                    // 6-digit suffix + the "-update" rename suffix all still fit a 30-character field.
+                    String roleMillis = String.format("%06d", (System.currentTimeMillis() / 1000) % 1_000_000);
+                    String roleBase = ConfigReader.getOrDefault("role.creation.name", "Testing role");
+                    if (roleBase.length() > 13) {
+                        roleBase = roleBase.substring(0, 13).trim();
+                    }
+                    String uniqueRoleName = roleBase + " " + roleMillis.substring(roleMillis.length() - 6);
+                    RoleData newRole = new RoleData(uniqueRoleName, true);
                     RoleData updatedRole = new RoleData(
-                            ConfigReader.getOrDefault("role.creation.name", "Testing role")
-                                    + ConfigReader.getOrDefault("role.update.name.suffix", "-update"),
+                            uniqueRoleName + ConfigReader.getOrDefault("role.update.name.suffix", "-update"),
                             true);
                     validatePage(page, result, "Users & Roles - Role Lifecycle",
                             () -> roles.runRoleLifecycle(newRole, updatedRole));

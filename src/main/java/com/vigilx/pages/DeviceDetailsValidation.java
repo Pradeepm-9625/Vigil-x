@@ -160,16 +160,16 @@ public class DeviceDetailsValidation extends BasePage {
     }
 
     /**
-     * Devices list only (no device opened) - Dashboard -&gt; Project Hierarchy -&gt; Devices, per
-     * the recorded flow for this Create Device entry point specifically. A distinct, smaller copy
-     * of {@link #open}'s own navigation (which goes straight to "Devices" and is left exactly as it
-     * was for every other caller) - this method is only ever used by {@link #createDevice}.
+     * Devices list only (no device opened) - goes straight to "Devices", same end state
+     * {@link #open} itself reaches. In the soak run this is called right after Project Hierarchy has
+     * already been validated (see {@link com.vigilx.soak.SoakHealthCheckRunner}), so it no longer
+     * pre-clicks "Dashboard" then "Project Hierarchy" first - doing so only re-visited pages the
+     * caller had just finished checking, a duplicate navigation with no effect on the end state
+     * (Devices list open, "Add Devices" visible) that {@link #createDevice} actually needs. Used
+     * only by {@link #createDevice}.
      */
     private boolean navigateToDevicesList(String baseUrl) {
         try {
-            clickLinkIfPresent("Dashboard");
-            clickLinkIfPresent("Project Hierarchy");
-
             Locator devicesLink = page.getByRole(AriaRole.LINK,
                     new Page.GetByRoleOptions().setName("Devices").setExact(false)).first();
             if (SoakUiUtils.waitVisible(devicesLink, ELEMENT_TIMEOUT_MS)) {
@@ -186,24 +186,6 @@ public class DeviceDetailsValidation extends BasePage {
         boolean ready = SoakUiUtils.waitVisible(addDevices, SHELL_TIMEOUT_MS);
         System.out.println("[DEVICE CREATION] Devices list opened: " + (ready ? "YES" : "NO"));
         return ready;
-    }
-
-    /** Clicks a left-nav link by (partial) name if it is currently visible; a no-op otherwise. */
-    private void clickLinkIfPresent(String name) {
-        try {
-            Locator link = page.getByRole(AriaRole.LINK,
-                    new Page.GetByRoleOptions().setName(name).setExact(false)).first();
-            if (SoakUiUtils.isVisibleQuietly(link)) {
-                link.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                waitAfterPageNavigation();
-                System.out.println("[DEVICE CREATION]   '" + name + "' link clicked.");
-            } else {
-                System.out.println("[DEVICE CREATION]   '" + name + "' link not present; skipping.");
-            }
-        } catch (Exception exception) {
-            System.out.println("[DEVICE CREATION]   '" + name + "' link could not be clicked: "
-                    + firstLine(exception.getMessage()));
-        }
     }
 
     /** "Add Devices" -&gt; "Add Device Manually", waits for the Device IP field to render. */
@@ -632,6 +614,11 @@ public class DeviceDetailsValidation extends BasePage {
             System.out.println("DEVICE DECOMMISSION - removing '" + deviceName + "'");
             System.out.println(SEP);
 
+            // Defensive: clears any stray modal left open by whatever ran immediately before this
+            // (e.g. the Device Details tab walk's own dialogs) so it can never block the navigation
+            // below - the same closeOpenDialogs() the tab walk already uses between its own tabs.
+            closeOpenDialogs();
+
             if (!backToDevicesList(baseUrl)) {
                 capture("device-decommission-devices-list-not-open");
                 return false;
@@ -821,10 +808,16 @@ public class DeviceDetailsValidation extends BasePage {
             System.out.println("DEVICE DETAILS VALIDATION - opening a device");
             System.out.println(SEP);
 
-            // No duplicate navigation: the run reaches this straight after the existing "Device
-            // Tabs" check, which already left a device configuration page open. Reuse it instead
-            // of navigating back to the Devices list and re-opening a device.
-            if (isOnDeviceConfigPage()) {
+            String deviceText = ConfigReader.getOrDefault("device.details.device.text", "").trim();
+
+            // No duplicate navigation: when no specific device is targeted, the run reaches this
+            // straight after the existing "Device Tabs" check, which already left A device
+            // configuration page open - reuse it instead of navigating back to the Devices list.
+            // Confirmed live: this shortcut must NEVER fire when a specific device IS targeted
+            // (deviceText non-blank, e.g. right after Device Creation) - "Device Tabs" can leave a
+            // DIFFERENT device's page open (whichever the list shows first as Online), and reusing
+            // it silently validated the wrong device instead of the one just onboarded.
+            if (deviceText.isBlank() && isOnDeviceConfigPage()) {
                 System.out.println("[DEVICE DETAILS] Already on a device configuration page; reusing it.");
                 return true;
             }
@@ -843,17 +836,22 @@ public class DeviceDetailsValidation extends BasePage {
             online.first().waitFor(new Locator.WaitForOptions()
                     .setState(WaitForSelectorState.VISIBLE).setTimeout(SHELL_TIMEOUT_MS));
 
-            String deviceText = ConfigReader.getOrDefault("device.details.device.text", "").trim();
             Locator deviceRow;
             if (deviceText.isBlank()) {
                 deviceRow = online.first();
             } else {
+                // A specific device is targeted: never substitute a different one. A previous
+                // version fell back to "the first Online device" here when the named row could not
+                // be found - silently validating/decommissioning a random device instead of the one
+                // just onboarded. Now this is a hard failure instead.
                 Locator named = page.getByText(deviceText, new Page.GetByTextOptions().setExact(false)).first();
-                deviceRow = named.count() > 0 ? named : online.first();
-                if (named.count() == 0) {
+                if (!SoakUiUtils.waitVisible(named, SHELL_TIMEOUT_MS)) {
                     System.err.println("[DEVICE DETAILS] Row '" + deviceText
-                            + "' not found; opening the first Online device instead.");
+                            + "' not found; refusing to fall back to a different device.");
+                    capture("device-details-target-row-not-found");
+                    return false;
                 }
+                deviceRow = named;
             }
 
             deviceRow.click(new Locator.ClickOptions().setTimeout(10000));

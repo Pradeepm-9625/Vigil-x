@@ -5,7 +5,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
@@ -18,6 +17,7 @@ import java.util.Set;
  *     api-failures/     page-failures/     stream-failures/
  *     final-report/
  *     screenshots/{Page}/{Tab}/   - created lazily, only once a genuine failure captures one
+ *     logs/{Page}/{Tab}/          - same: created lazily, only alongside that failure's screenshot
  * </pre>
  *
  * <p>Existing validators are redirected into this folder <em>without code changes</em> by setting
@@ -105,16 +105,12 @@ public final class SoakRunContext {
             Files.createDirectories(directory.resolve("page-failures"));
             Files.createDirectories(directory.resolve("stream-failures"));
             Files.createDirectories(directory.resolve("final-report"));
-            // screenshots/ is intentionally NOT pre-created here (legacy flat folders or the
-            // per-Page/Tab tree): a PASS-only run must never leave behind an empty screenshots/
-            // directory. Every real capture path already creates its own target directory lazily,
-            // at the moment a genuine failure screenshot is taken - ScreenshotUtils.captureTo() and
+            // Neither screenshots/ nor logs/ is pre-created here (legacy flat folders or the
+            // per-Page/Tab tree): a PASS-only run must never leave behind empty screenshots/ or
+            // logs/ directories. Every real capture path already creates its own target directory
+            // lazily, at the moment a genuine failure is captured - ScreenshotUtils.captureTo() and
             // .captureFailure() both already do this (Files.createDirectories(...) right before
-            // page.screenshot(...)), so nothing else needs to change for that to keep working.
-            // logs/ is unrelated to this and still pre-created as before.
-            for (String folder : knownPageTabFolders()) {
-                Files.createDirectories(directory.resolve("logs").resolve(Paths.get(folder)));
-            }
+            // writing the screenshot/log), so nothing else needs to change for that to keep working.
 
             // Redirect the validators that already read these keys; no edits needed in those classes.
             // Pointed at the SAME Page/Tab folders as everything else (Maps/, Archive/, LiveView/)
@@ -222,17 +218,6 @@ public final class SoakRunContext {
             return "Other";
         }
         return (tab == null || tab.isBlank()) ? page : page + "/" + tab;
-    }
-
-    /** Every Page[/Tab] folder this table already knows about, for pre-creating the tree upfront. */
-    private static Set<String> knownPageTabFolders() {
-        Set<String> folders = new LinkedHashSet<>();
-        for (String[] entry : PAGE_TAB_PREFIXES) {
-            String page = entry[1];
-            String tab = entry[2];
-            folders.add(tab.isBlank() ? page : page + "/" + tab);
-        }
-        return folders;
     }
 
     /** Strips a step-name fragment down to a filesystem-safe folder segment (letters/digits only). */
