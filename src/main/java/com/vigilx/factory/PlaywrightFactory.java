@@ -102,6 +102,10 @@ public final class PlaywrightFactory {
         Browser.NewContextOptions contextOptions = headless
                 ? new Browser.NewContextOptions().setViewportSize(1920, 1080)
                 : new Browser.NewContextOptions().setViewportSize(null);
+        // The soak target can be reached over HTTPS with a self-signed/internal cert
+        // (ERR_CERT_AUTHORITY_INVALID otherwise); this only relaxes certificate validation and has
+        // no effect on a plain-HTTP base.url, so the existing HTTP flow is unchanged.
+        contextOptions.setIgnoreHTTPSErrors(true);
         browserContext = browser.newContext(contextOptions);
 
         // Attached before the first page exists, so no request can be missed and popups/new pages
