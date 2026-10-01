@@ -121,7 +121,11 @@ public class DeviceDetailsValidation extends BasePage {
             }
 
             if (!testConnection()) {
+                System.out.println("[DEVICE CREATION] Test Connection failed; abandoning this onboarding "
+                        + "attempt and moving on (Tab Navigation validation will use a randomly selected "
+                        + "existing device instead).");
                 capture("device-creation-test-connection-failed");
+                abandonOnboardingAfterFailedConnection();
                 return false;
             }
 
@@ -294,6 +298,42 @@ public class DeviceDetailsValidation extends BasePage {
         return connected;
     }
 
+    /**
+     * Test Connection failed: abandons this onboarding attempt rather than leaving the form stuck -
+     * clicks "Devices" to navigate away, confirms the resulting "unsaved changes" dialog via its own
+     * "Continue" button when one appears, and lands back on the Devices list. Matches the recorded
+     * failure-path interaction (Test Connection -&gt; Devices -&gt; confirmation dialog -&gt; Continue).
+     * Best-effort: any failure here is only logged, never thrown - the caller already treats a failed
+     * Test Connection as this onboarding attempt failing regardless of whether this cleanup succeeds.
+     */
+    private void abandonOnboardingAfterFailedConnection() {
+        try {
+            Locator devicesLink = page.getByRole(AriaRole.LINK,
+                    new Page.GetByRoleOptions().setName("Devices").setExact(false)).first();
+            if (SoakUiUtils.isVisibleQuietly(devicesLink)) {
+                devicesLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            }
+
+            Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+            if (SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
+                Locator continueButton = dialog.getByRole(AriaRole.BUTTON,
+                        new Locator.GetByRoleOptions().setName("Continue").setExact(false)).first();
+                if (!SoakUiUtils.isVisibleQuietly(continueButton)) {
+                    continueButton = page.getByRole(AriaRole.BUTTON,
+                            new Page.GetByRoleOptions().setName("Continue").setExact(false)).first();
+                }
+                if (SoakUiUtils.waitVisible(continueButton, ELEMENT_TIMEOUT_MS)) {
+                    continueButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                }
+            }
+            waitAfterPageNavigation();
+            System.out.println("[DEVICE CREATION]   Onboarding abandoned; back on the Devices list.");
+        } catch (Exception exception) {
+            System.out.println("[DEVICE CREATION]   Abandoning onboarding after failed Test Connection "
+                    + "hit an error (non-fatal): " + firstLine(exception.getMessage()));
+        }
+    }
+
     /** Best-effort: opens the live preview, clicks the video once, then closes it. Never fails the flow. */
     private void previewLiveStreamBestEffort() {
         Locator openPreview = page.getByRole(AriaRole.BUTTON,
@@ -395,8 +435,15 @@ public class DeviceDetailsValidation extends BasePage {
      * flow.
      */
     private void selectSiteBestEffort() {
+        // Confirmed live: this control can render as an accessible role=combobox (its own filtered
+        // lookup below) OR as a plain role=button named "Select Site" (per the latest recording) -
+        // both are checked, in that order, so neither build silently skips site selection.
         Locator siteCombobox = page.getByRole(AriaRole.COMBOBOX)
                 .filter(new Locator.FilterOptions().setHasText("Select Site")).first();
+        if (!SoakUiUtils.isVisibleQuietly(siteCombobox)) {
+            siteCombobox = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Select Site").setExact(false)).first();
+        }
         if (!SoakUiUtils.isVisibleQuietly(siteCombobox)) {
             System.out.println("[DEVICE CREATION]   'Select Site' control not found; skipping.");
             return;
@@ -865,6 +912,59 @@ public class DeviceDetailsValidation extends BasePage {
         } catch (Exception exception) {
             System.err.println("[DEVICE DETAILS] Could not open a device page: " + exception.getMessage());
             capture("device-details-open-failed");
+            return false;
+        }
+    }
+
+    /**
+     * Fallback for when Device Creation's Test Connection failed and onboarding was abandoned:
+     * opens a random Online device from the Devices list so Tab Navigation validation still runs
+     * against a real device instead of the run stopping. Additional to {@link #open}, which is
+     * unchanged and still used for the normal (targeted or reuse) path - this is only ever called
+     * by a caller that already knows no device was created this run, so it never substitutes a
+     * random device for one {@link #open} was asked to target.
+     *
+     * @return {@code true} once the device configuration shell is visible
+     */
+    public boolean openRandomDevice(String baseUrl) {
+        try {
+            System.out.println(SEP);
+            System.out.println("DEVICE DETAILS VALIDATION - opening a random existing device "
+                    + "(onboarding was not available)");
+            System.out.println(SEP);
+
+            if (isOnDeviceConfigPage()) {
+                System.out.println("[DEVICE DETAILS] Already on a device configuration page; reusing it.");
+                return true;
+            }
+
+            try {
+                page.getByRole(AriaRole.LINK,
+                                new Page.GetByRoleOptions().setName("Devices").setExact(false))
+                        .first().click(new Locator.ClickOptions().setTimeout(10000));
+            } catch (Exception ignored) {
+                navigateTo(baseUrl + "/devices");
+            }
+            waitAfterPageNavigation();
+
+            Locator online = page.getByText("Online", new Page.GetByTextOptions().setExact(true));
+            if (!SoakUiUtils.waitVisible(online.first(), SHELL_TIMEOUT_MS)) {
+                System.err.println("[DEVICE DETAILS] No Online device row found to select randomly.");
+                capture("device-details-random-no-online-device");
+                return false;
+            }
+            int count = online.count();
+            int index = count > 0 ? new java.util.Random().nextInt(count) : 0;
+            online.nth(index).click(new Locator.ClickOptions().setTimeout(10000));
+            waitAfterPageNavigation();
+
+            boolean opened = SoakUiUtils.waitVisible(
+                    page.locator(PAGE_BODY + ", " + TAB_CONTENT).first(), SHELL_TIMEOUT_MS);
+            System.out.println("[DEVICE DETAILS] Random existing device opened: " + (opened ? "YES" : "NO"));
+            return opened;
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DETAILS] Could not open a random device: " + exception.getMessage());
+            capture("device-details-random-open-failed");
             return false;
         }
     }
