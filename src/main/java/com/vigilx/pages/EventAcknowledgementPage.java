@@ -57,29 +57,48 @@ public class EventAcknowledgementPage extends BasePage {
     // Navigation
     // ---------------------------------------------------------------------
 
-    /** Opens Settings (only if not already open), "Event Check", then "Event Acknowledgement". */
+    /**
+     * Opens Settings (only if not already open) then the message list - confirmed live via a real
+     * recording that this is now reached via "Master Data" -&gt; its own "Event Ack" tab (the same
+     * tab {@link MasterDataPage#visitEventAckTab()} already opens, so calling this right after that
+     * finds "Add message" already on screen and skips navigation entirely); the original "Event
+     * Check" left-nav path is kept as a fallback in case some environment still exposes it.
+     */
     public boolean navigateToEventAcknowledgement() {
         Locator addMessage = addMessageButton();
         if (!SoakUiUtils.isVisibleQuietly(addMessage)) {
             try {
                 Locator openSettings = page.getByRole(AriaRole.BUTTON,
                         new Page.GetByRoleOptions().setName("Open settings").setExact(false)).first();
+                Locator masterDataLink = page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions()
+                        .setName(Pattern.compile("master\\s*data", Pattern.CASE_INSENSITIVE))).first();
                 Locator eventCheckLink = page.getByText(
                         Pattern.compile("^\\s*Event Check\\s*$", Pattern.CASE_INSENSITIVE)).first();
-                boolean settingsAlreadyOpen = SoakUiUtils.isVisibleQuietly(eventCheckLink);
+                boolean settingsAlreadyOpen = SoakUiUtils.isVisibleQuietly(masterDataLink)
+                        || SoakUiUtils.isVisibleQuietly(eventCheckLink);
                 if (!settingsAlreadyOpen && SoakUiUtils.isVisibleQuietly(openSettings)) {
                     openSettings.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                     page.waitForTimeout(500);
                 }
-                if (SoakUiUtils.waitVisible(eventCheckLink, ELEMENT_TIMEOUT_MS)) {
-                    eventCheckLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                if (SoakUiUtils.waitVisible(masterDataLink, ELEMENT_TIMEOUT_MS)) {
+                    masterDataLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                     page.waitForTimeout(800);
                 }
-                Locator eventAck = page.getByText(
-                        Pattern.compile("Event Acknowledgement", Pattern.CASE_INSENSITIVE)).first();
-                if (SoakUiUtils.waitVisible(eventAck, ELEMENT_TIMEOUT_MS)) {
-                    eventAck.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                Locator eventAckTab = page.getByRole(AriaRole.TAB,
+                        new Page.GetByRoleOptions().setName("Event Ack").setExact(false)).first();
+                if (SoakUiUtils.waitVisible(eventAckTab, ELEMENT_TIMEOUT_MS)) {
+                    eventAckTab.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                     page.waitForTimeout(800);
+                }
+                if (!SoakUiUtils.isVisibleQuietly(addMessage) && SoakUiUtils.waitVisible(eventCheckLink, 2000)) {
+                    eventCheckLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                    page.waitForTimeout(800);
+                    Locator eventAck = page.getByText(
+                            Pattern.compile("Event Acknowledgement", Pattern.CASE_INSENSITIVE)).first();
+                    if (SoakUiUtils.waitVisible(eventAck, ELEMENT_TIMEOUT_MS)) {
+                        eventAck.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                        page.waitForTimeout(800);
+                    }
                 }
             } catch (Exception exception) {
                 System.err.println("[EVENT ACKNOWLEDGEMENT]   Could not open Event Acknowledgement: "
@@ -212,9 +231,13 @@ public class EventAcknowledgementPage extends BasePage {
 
     /**
      * Opens "Edit {messageIdentifier}", clicks its "Delete", confirms the resulting confirmation
-     * dialog (identified by its own "Are you sure you want to" text, never a page-wide button
-     * index), clicks that confirmation dialog's OWN "Delete", and confirms both the toast and that
-     * the message is gone.
+     * dialog (identified by its own "Delete Message" title text, never a page-wide button index -
+     * confirmed live via a real recording that this dialog's text is "Delete Message / This action
+     * cannot be undone.", not the generic "Are you sure you want to" originally assumed here),
+     * clicks that confirmation dialog's OWN "Delete", and confirms both the toast and that the
+     * message is gone. Any still-open dialog is closed on every exit path - confirmed live that a
+     * failure here (the confirm dialog not matching) otherwise leaves the editor open and blocks
+     * every click on the rest of the page for the remainder of the run.
      */
     public boolean deleteEventAcknowledgement(String messageIdentifier) {
         Locator editButton = editButtonFor(messageIdentifier);
@@ -231,6 +254,7 @@ public class EventAcknowledgementPage extends BasePage {
                     new Locator.GetByRoleOptions().setName("Delete").setExact(true)).first();
             if (!SoakUiUtils.waitVisible(deleteButton, ELEMENT_TIMEOUT_MS)) {
                 System.err.println("[EVENT ACKNOWLEDGEMENT]   Edit dialog's 'Delete' control not found.");
+                SoakUiUtils.closeOpenDialogs(page);
                 return false;
             }
             deleteButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
@@ -242,16 +266,18 @@ public class EventAcknowledgementPage extends BasePage {
             // Playwright's browser-side engine (confirmed the hard way while fixing this exact bug
             // in QCPage's own delete confirmation).
             Locator confirmDialog = page.getByRole(AriaRole.DIALOG)
-                    .filter(new Locator.FilterOptions().setHasText("Are you sure you want to"))
+                    .filter(new Locator.FilterOptions().setHasText("Delete Message"))
                     .first();
             if (!SoakUiUtils.waitVisible(confirmDialog, ELEMENT_TIMEOUT_MS)) {
                 System.err.println("[EVENT ACKNOWLEDGEMENT]   Delete confirmation dialog not found.");
+                SoakUiUtils.closeOpenDialogs(page);
                 return false;
             }
             Locator confirmDelete = confirmDialog.getByRole(AriaRole.BUTTON,
                     new Locator.GetByRoleOptions().setName("Delete").setExact(true)).first();
             if (!SoakUiUtils.waitVisible(confirmDelete, ELEMENT_TIMEOUT_MS)) {
                 System.err.println("[EVENT ACKNOWLEDGEMENT]   Confirmation dialog's own 'Delete' button not found.");
+                SoakUiUtils.closeOpenDialogs(page);
                 return false;
             }
 

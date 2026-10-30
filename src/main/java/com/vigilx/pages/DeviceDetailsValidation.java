@@ -666,6 +666,25 @@ public class DeviceDetailsValidation extends BasePage {
             // below - the same closeOpenDialogs() the tab walk already uses between its own tabs.
             closeOpenDialogs();
 
+            // Fast path: this runs right after the Device Details tab walk, which already leaves
+            // THIS exact device's own configuration page open - its own "More Actions" menu already
+            // exposes "Decommission Device" right there (confirmed live: the "Controls" section's
+            // own More Actions probe finds it), no navigation needed. Confirmed live: navigating
+            // back to the Devices list first (the row-menu path below) can land right back on this
+            // same device's page instead of the list - the left-nav "Devices" link only expands
+            // that nav group rather than navigating anywhere - so this direct path is tried first,
+            // falling back to the list/row-menu path only when it does not pan out.
+            if (isOnDeviceConfigPage() && SoakUiUtils.isVisibleQuietly(
+                    page.getByText(deviceName, new Page.GetByTextOptions().setExact(false)).first())) {
+                if (decommissionViaDeviceOwnMenu()) {
+                    System.out.println("[DEVICE DECOMMISSION] Device '" + deviceName
+                            + "' decommissioned via its own 'More Actions' menu.");
+                    return true;
+                }
+                System.out.println("[DEVICE DECOMMISSION]   Device's own 'More Actions' menu did not expose "
+                        + "'Decommission Device'; falling back to the Devices list row menu.");
+            }
+
             if (!backToDevicesList(baseUrl)) {
                 capture("device-decommission-devices-list-not-open");
                 return false;
@@ -701,6 +720,56 @@ public class DeviceDetailsValidation extends BasePage {
             capture("device-decommission-exception");
             return false;
         }
+    }
+
+    /**
+     * Opens THIS device's own "More Actions" menu (the same trigger {@link #exerciseMoreActionsMenu}
+     * already probes) and clicks "Decommission", then confirms via {@link #confirmDecommission}.
+     * {@code false} - never thrown - whenever the trigger or the "Decommission" item is not found, so
+     * the caller can fall back to the Devices list row menu instead.
+     */
+    private boolean decommissionViaDeviceOwnMenu() {
+        Locator trigger = page.locator(".vxdd, [class*='more-toggle' i]")
+                .filter(new Locator.FilterOptions().setHasText(Pattern.compile(
+                        "more actions", Pattern.CASE_INSENSITIVE)))
+                .first();
+        if (trigger.count() == 0) {
+            trigger = page.locator("[class*='more-toggle' i]").first();
+        }
+        if (!SoakUiUtils.isVisibleQuietly(trigger)) {
+            return false;
+        }
+        try {
+            trigger.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(500);
+        } catch (Exception exception) {
+            System.out.println("[DEVICE DECOMMISSION]   Device's own 'More Actions' could not be opened: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        Locator decommission = page.getByText(Pattern.compile("decommission", Pattern.CASE_INSENSITIVE)).first();
+        if (!SoakUiUtils.waitVisible(decommission, ELEMENT_TIMEOUT_MS)) {
+            try {
+                page.keyboard().press("Escape");
+            } catch (Exception ignored) {
+                // Best effort.
+            }
+            return false;
+        }
+        try {
+            decommission.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DECOMMISSION]   'Decommission' (device's own menu) could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        if (!confirmDecommission()) {
+            capture("device-decommission-own-menu-confirm-failed");
+            return false;
+        }
+        return true;
     }
 
     /** "Back to devices" when present (leaving a device's own settings page); otherwise the Devices list link. */
@@ -860,12 +929,23 @@ public class DeviceDetailsValidation extends BasePage {
             // No duplicate navigation: when no specific device is targeted, the run reaches this
             // straight after the existing "Device Tabs" check, which already left A device
             // configuration page open - reuse it instead of navigating back to the Devices list.
-            // Confirmed live: this shortcut must NEVER fire when a specific device IS targeted
-            // (deviceText non-blank, e.g. right after Device Creation) - "Device Tabs" can leave a
-            // DIFFERENT device's page open (whichever the list shows first as Online), and reusing
-            // it silently validated the wrong device instead of the one just onboarded.
             if (deviceText.isBlank() && isOnDeviceConfigPage()) {
                 System.out.println("[DEVICE DETAILS] Already on a device configuration page; reusing it.");
+                return true;
+            }
+
+            // A specific device IS targeted (e.g. right after Device Creation, which leaves this
+            // exact device's own configuration page open): reuse the already-open page only when it
+            // genuinely is that device's page - never a DIFFERENT device's page some earlier step
+            // (e.g. "Device Tabs", which opens whichever row the list shows first as Online) happened
+            // to leave open. Confirmed live: re-navigating to the Devices list here instead, right
+            // after onboarding, can time out waiting for an "Online" row - a freshly onboarded device
+            // is not necessarily Online yet - so reusing the page Device Creation already verified is
+            // both faster and more reliable than re-finding it.
+            if (!deviceText.isBlank() && isOnDeviceConfigPage()
+                    && SoakUiUtils.isVisibleQuietly(
+                            page.getByText(deviceText, new Page.GetByTextOptions().setExact(false)).first())) {
+                System.out.println("[DEVICE DETAILS] Already on '" + deviceText + "'s configuration page; reusing it.");
                 return true;
             }
 
@@ -1021,11 +1101,65 @@ public class DeviceDetailsValidation extends BasePage {
                 page.getByText(Pattern.compile(
                         "device name|model|serial|firmware|ip address|mac address|manufacturer",
                         Pattern.CASE_INSENSITIVE)));
-        boolean ok = shell && (tabStrip || info);
+
+        // "Edit Device" -> "Save changes", no field edits in between - matches the recorded flow
+        // exactly and confirms the edit round trip actually commits.
+        boolean editSaved = exerciseEditDeviceSave();
+
+        boolean ok = shell && (tabStrip || info) && editSaved;
         if (!ok) {
             capture("details-tab");
         }
         return ok;
+    }
+
+    /**
+     * "Edit Device" -&gt; "Save changes" with no field changes. The "Save changes" click is scoped to
+     * whatever dialog "Edit Device" opens - never the page-wide first match {@link #clickSaveChanges}
+     * uses, which is safe only on Device Creation's own standalone onboarding wizard page. On this
+     * tab-rich device configuration page, several other tabs' own "Save changes" controls stay in the
+     * DOM while hidden, and an unscoped match can land on one of those instead - confirmed live: it
+     * caused the whole session to log out, failing every section after Details. A missing
+     * "Edit Device" control, or a dialog with no "Save changes" of its own, is a clean skip.
+     */
+    private boolean exerciseEditDeviceSave() {
+        Locator editDevice = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Edit Device").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(editDevice, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[DEVICE DETAILS]   'Edit Device' control not present; skipping.");
+            return true;
+        }
+        try {
+            editDevice.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(800);
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DETAILS]   'Edit Device' could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+        if (!SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[DEVICE DETAILS]   'Edit Device' did not open a dialog; skipping its Save changes.");
+            return true;
+        }
+        Locator save = dialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName("Save changes").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(save, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[DEVICE DETAILS]   Edit Device dialog has no 'Save changes' control; closing it.");
+            closeOpenDialogs();
+            return true;
+        }
+        try {
+            save.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(1000);
+            System.out.println("[DEVICE DETAILS]   Edit Device 'Save changes' clicked.");
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DETAILS]   Edit Device 'Save changes' could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
     }
 
     private boolean validateStreamsTab() {
@@ -1034,6 +1168,8 @@ public class DeviceDetailsValidation extends BasePage {
             return false;
         }
         boolean shell = expect("tab content", page.locator(TAB_CONTENT));
+
+        exerciseMainStreamSelection();
 
         // "Validate the stream is available or not": determine and report availability. A device
         // that produces no live frame here is a valid observation, not a tab failure - the failing
@@ -1097,6 +1233,31 @@ public class DeviceDetailsValidation extends BasePage {
         }
     }
 
+    /** Reselects "Main Stream" from the Streams tab's own stream-profile control - matches the
+     *  recorded flow (click the "Main Stream" cell, then re-pick "Main Stream" from the list it
+     *  opens). Informational only: a missing control just logs, never fails the tab. */
+    private void exerciseMainStreamSelection() {
+        Locator mainStreamCell = page.getByRole(AriaRole.CELL,
+                new Page.GetByRoleOptions().setName("Main Stream").setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(mainStreamCell, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[DEVICE DETAILS]   'Main Stream' selector not present; skipping.");
+            return;
+        }
+        try {
+            mainStreamCell.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(500);
+            Locator option = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Main Stream").setExact(true)).first();
+            if (SoakUiUtils.waitVisible(option, ELEMENT_TIMEOUT_MS)) {
+                option.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                System.out.println("[DEVICE DETAILS]   'Main Stream' reselected.");
+            }
+        } catch (Exception exception) {
+            System.out.println("[DEVICE DETAILS]   'Main Stream' selection could not be probed; skipping: "
+                    + firstLine(exception.getMessage()));
+        }
+    }
+
     private boolean validateRecordingsTab() {
         if (!clickTab("Recordings")) {
             capture("recordings-tab-not-open");
@@ -1105,14 +1266,77 @@ public class DeviceDetailsValidation extends BasePage {
         boolean shell = expect("tab content", page.locator(TAB_CONTENT));
         boolean recording = expect("Recording section",
                 page.getByText(Pattern.compile("recording", Pattern.CASE_INSENSITIVE)));
-        // Backup / Base sub-tabs from the recording, when the build has them.
-        clickSubTabIfPresent("Backup");
+
+        // Base / Event recording toggles - each click confirmed via whatever popup follows
+        // (Enable/Disable/Yes/Confirm/Ok), same pattern Master Configuration's own base-recording
+        // toggle uses.
+        toggleSwitchIfPresent("Enable Base recording");
+        toggleSwitchIfPresent("Enable event recording");
+
+        // Backup sub-tab: Secondary Server / NAS/SAN / Cloud / FTP switches. Cloud is toggled twice
+        // in the recording (net back to its original state) - Base recording's own
+        // "two toggles net back to the original state" pattern, applied here to just that one switch.
+        if (clickSubTabIfPresent("Backup")) {
+            toggleSwitchIfPresent("Enable Secondary Server");
+            toggleSwitchIfPresent("Enable NAS/SAN");
+            toggleSwitchIfPresent("Enable Cloud");
+            toggleSwitchIfPresent("Enable Cloud");
+            toggleSwitchIfPresent("Enable FTP (Only Events)");
+        }
         clickSubTabIfPresent("Base");
+
         boolean ok = shell && recording;
         if (!ok) {
             capture("recordings-tab");
         }
         return ok;
+    }
+
+    /** Clicks a switch by name, if present, and confirms whatever popup follows (Enable/Disable/Yes/
+     *  Confirm/Ok) - the same confirmation pattern Master Configuration's own toggle-and-confirm
+     *  uses. A missing switch is a clean skip; a found-but-unclickable one is a real failure. */
+    private boolean toggleSwitchIfPresent(String switchName) {
+        Locator toggle = page.getByRole(AriaRole.SWITCH,
+                new Page.GetByRoleOptions().setName(switchName).setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(toggle, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[DEVICE DETAILS]   '" + switchName + "' switch not present; skipping.");
+            return true;
+        }
+        try {
+            toggle.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[DEVICE DETAILS]   '" + switchName + "' could not be clicked: "
+                    + firstLine(exception.getMessage()));
+            return false;
+        }
+
+        Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+        if (SoakUiUtils.waitVisible(dialog, 3000)) {
+            Locator confirmButton = dialog.getByRole(AriaRole.BUTTON, new Locator.GetByRoleOptions()
+                    .setName(Pattern.compile("^(enable|disable|yes|confirm|ok)$", Pattern.CASE_INSENSITIVE)))
+                    .first();
+            if (confirmButton.count() > 0) {
+                try {
+                    String buttonText = firstLine(confirmButton.innerText());
+                    confirmButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                    System.out.println("[DEVICE DETAILS]   '" + switchName + "': confirmation popup -> '"
+                            + buttonText + "' clicked.");
+                } catch (Exception exception) {
+                    System.err.println("[DEVICE DETAILS]   Could not confirm the popup for '" + switchName
+                            + "': " + firstLine(exception.getMessage()));
+                    closeOpenDialogs();
+                    return false;
+                }
+            } else {
+                System.out.println("[DEVICE DETAILS]   '" + switchName
+                        + "': a popup opened with no recognised confirm button; closing it.");
+                closeOpenDialogs();
+            }
+            page.waitForTimeout(500);
+        } else {
+            System.out.println("[DEVICE DETAILS]   '" + switchName + "': no confirmation popup.");
+        }
+        return true;
     }
 
     /**
@@ -1204,17 +1428,99 @@ public class DeviceDetailsValidation extends BasePage {
                 page.getByText(Pattern.compile("network", Pattern.CASE_INSENSITIVE)));
         boolean videoImage = expect("Video and Image section",
                 page.getByText(Pattern.compile("video and image", Pattern.CASE_INSENSITIVE)));
-        clickSubTabIfPresent("Video and Image");
+
+        // Network -> "Ping": Test Interval / Alert Level / Alert Threshold / Notification, then
+        // Save changes - same four-field convention Master Configuration's own Network/Ping check
+        // uses.
         clickSubTabIfPresent("Network");
+        boolean networkOk = configureHealthCheckRow("Ping", "Every 10 Sec", "Critical", "1X", "Yes")
+                && clickSaveChanges("Health - Network");
+
+        // Video and Image shows both "Black Frame Detection" and "Blur Detection" rows at once
+        // (confirmed live on Master Configuration's identical panel) - each is set and scoped to
+        // its own row so one row's selection never lands on the other's identically-named option,
+        // then both are saved together with the single "Save changes" the recording shows.
+        clickSubTabIfPresent("Video and Image");
+        boolean blackFrameOk = configureHealthCheckRow("Black Frame Detection",
+                "Performed Twice Daily", "Critical", "90%", "Yes");
+        boolean blurOk = configureHealthCheckRow("Blur Detection",
+                "Performed Twice Daily", "Critical", "90%", "Yes");
+        boolean videoImageOk = blackFrameOk && blurOk && clickSaveChanges("Health - Video and Image");
+
         boolean healthConfig = expect("health check fields (Test Interval / Alert Level / Check)",
                 page.getByText(Pattern.compile("test interval|alert level|check", Pattern.CASE_INSENSITIVE)));
-        boolean ok = shell && (network || videoImage || healthConfig);
+        boolean ok = shell && (network || videoImage || healthConfig) && networkOk && videoImageOk;
         if (!ok) {
             capture("health-tab");
         }
         return ok;
     }
 
+    /** Locates the Check row named {@code rowLabel} (e.g. "Ping", "Black Frame Detection") and sets
+     *  its four dropdown fields (Test Interval / Alert Level / Alert Threshold / Notification) to
+     *  {@code values}, in that column order. Scoped to the row itself via {@link #rowScope} so two
+     *  rows with the same column values on screen at once (Video and Image's two checks) never
+     *  cross-contaminate each other's selection. A missing row is a clean skip, not a failure - the
+     *  device may not expose every check. */
+    private boolean configureHealthCheckRow(String rowLabel, String... values) {
+        Locator row = rowScope(rowLabel);
+        if (row == null) {
+            System.out.println("[DEVICE DETAILS]   '" + rowLabel + "' row not present; skipping.");
+            return true;
+        }
+        Locator triggers = row.getByRole(AriaRole.BUTTON);
+        if (triggers.count() < values.length) {
+            System.out.println("[DEVICE DETAILS]   '" + rowLabel
+                    + "' row has fewer controls than expected; skipping.");
+            return true;
+        }
+        for (int index = 0; index < values.length; index++) {
+            String value = values[index];
+            try {
+                triggers.nth(index).click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName(value).setExact(true))
+                        .first().click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            } catch (Exception exception) {
+                System.err.println("[DEVICE DETAILS]   '" + rowLabel + "' could not set field " + index
+                        + " to '" + value + "': " + firstLine(exception.getMessage()));
+                return false;
+            }
+        }
+        System.out.println("[DEVICE DETAILS]   '" + rowLabel + "' set " + values.length + " field(s): "
+                + String.join(", ", values));
+        return true;
+    }
+
+    /** Climbs from {@code rowLabel}'s own text up to the nearest ancestor that also holds its
+     *  dropdown controls (at least 4 buttons) - the row's own container, on a panel where more than
+     *  one check row can be on screen at once. Returns the smallest such ancestor (the first depth
+     *  that qualifies), never a container shared with a sibling row. {@code null} when the label
+     *  itself is not present. */
+    private Locator rowScope(String rowLabel) {
+        Locator label = page.getByText(rowLabel, new Page.GetByTextOptions().setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(label, ELEMENT_TIMEOUT_MS)) {
+            return null;
+        }
+        for (int depth = 1; depth <= 6; depth++) {
+            try {
+                Locator candidate = label.locator("xpath=ancestor::div[" + depth + "]");
+                if (candidate.count() > 0 && candidate.getByRole(AriaRole.BUTTON).count() >= 4) {
+                    return candidate;
+                }
+            } catch (Exception ignored) {
+                // Try the next ancestor depth.
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Matches the recorded flow exactly: Audit Logs tab -&gt; "Clear Date &amp; Time filter" ->
+     * "Export audit logs" -&gt; a real download. No search-box exercise here - that same generic
+     * search/clear check already runs on every other "Audit Logs" instance in the suite (Users &amp;
+     * Roles, Organisation, Master Configuration, Archive), so repeating it here would only be a
+     * duplicate check with no new coverage.
+     */
     private boolean validateAuditLogsTab() {
         if (!clickTab("Audit Logs")) {
             capture("audit-logs-tab-not-open");
@@ -1222,63 +1528,14 @@ public class DeviceDetailsValidation extends BasePage {
         }
         boolean shell = expect("tab content", page.locator(TAB_CONTENT));
 
-        Locator search = page.getByRole(AriaRole.TEXTBOX,
-                        new Page.GetByRoleOptions().setName(Pattern.compile("search .*audit", Pattern.CASE_INSENSITIVE)))
-                .or(page.getByPlaceholder("Search Devices Audit Logs"))
-                .first();
-
-        boolean searchBox = expect("Audit Logs search box", search);
         Locator exportButton = page.getByRole(AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Export audit logs").setExact(false)).first();
         boolean exportBtn = expect("Export audit logs button", exportButton);
 
-        boolean searchWorks = false;
-        if (searchBox) {
-            try {
-                // Plain alphanumerics only: unlikely to match a real audit entry, but nothing a
-                // server-side query validator would reject (which would muddy the API result).
-                String unlikely = "zzzzzznomatch";
-                search.fill(unlikely);
-                page.waitForTimeout(2000);
+        boolean dateCleared = clearAuditDateFilter();
+        boolean exported = exportBtn && exportAuditLogsDownload(exportButton);
 
-                boolean noData = isVisibleQuietly(page.getByTestId("no-data-container").first())
-                        || isVisibleQuietly(page.getByText(Pattern.compile(
-                        "no records found|no data|no results", Pattern.CASE_INSENSITIVE)).first());
-                System.out.println("[DEVICE DETAILS]   search '" + unlikely + "' -> no-data shown: " + noData);
-
-                Locator clear = page.getByRole(AriaRole.BUTTON,
-                        new Page.GetByRoleOptions().setName("Clear search").setExact(false)).first();
-                if (clear.count() > 0 && clear.isVisible()) {
-                    clear.click(new Locator.ClickOptions().setTimeout(5000));
-                } else {
-                    search.fill("");
-                }
-                page.waitForTimeout(1500);
-
-                String afterClear = "";
-                try {
-                    afterClear = search.inputValue();
-                } catch (Exception ignored) {
-                    // Composite locator or non-input target: treat as cleared if the read fails.
-                }
-                boolean cleared = afterClear == null || afterClear.isBlank();
-                System.out.println("[DEVICE DETAILS]   search cleared: " + cleared);
-                searchWorks = noData && cleared;
-            } catch (Exception exception) {
-                System.err.println("[DEVICE DETAILS]   search exercise error: " + exception.getMessage());
-            }
-        }
-
-        // Non-blocking, additive: clear the date filter (a no-op if already clear / not present)
-        // then actually click Export and confirm a real download starts - the pre-existing "ok"
-        // gate below is unchanged (shell/searchBox/exportBtn/searchWorks), so a flaky download
-        // never turns an otherwise-passing tab into a failure.
-        clearAuditDateFilter();
-        if (exportBtn) {
-            exportAuditLogsDownload(exportButton);
-        }
-
-        boolean ok = shell && searchBox && exportBtn && searchWorks;
+        boolean ok = shell && exportBtn && dateCleared && exported;
         if (!ok) {
             capture("audit-logs-tab");
         }
@@ -1474,7 +1731,7 @@ public class DeviceDetailsValidation extends BasePage {
         }
     }
 
-    private void clickSubTabIfPresent(String name) {
+    private boolean clickSubTabIfPresent(String name) {
         try {
             Locator sub = page.getByRole(AriaRole.TAB,
                     new Page.GetByRoleOptions().setName(name).setExact(true)).first();
@@ -1482,10 +1739,12 @@ public class DeviceDetailsValidation extends BasePage {
                 sub.click(new Locator.ClickOptions().setTimeout(5000));
                 page.waitForTimeout(1200);
                 System.out.println("[DEVICE DETAILS]   sub-tab '" + name + "' opened.");
+                return true;
             }
         } catch (Exception exception) {
             System.out.println("[DEVICE DETAILS]   sub-tab '" + name + "' not clickable: " + exception.getMessage());
         }
+        return false;
     }
 
     /** Waits briefly for a locator to be visible; logs PRESENT/MISSING and never throws. */
