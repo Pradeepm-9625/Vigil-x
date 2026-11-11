@@ -22,6 +22,7 @@ import com.vigilx.pages.ApplicationHealthPage;
 import com.vigilx.pages.ApplicationSettingsPage;
 import com.vigilx.pages.ArchiveExportValidation;
 import com.vigilx.pages.AuditLogsPage;
+import com.vigilx.pages.ConfigurationPage;
 import com.vigilx.pages.DeviceDetailsValidation;
 import com.vigilx.pages.EventAcknowledgementPage;
 import com.vigilx.pages.EventSearchValidation;
@@ -31,6 +32,7 @@ import com.vigilx.pages.GroupsPage;
 import com.vigilx.pages.LicensePage;
 import com.vigilx.pages.LiveViewCrudPage;
 import com.vigilx.pages.MasterConfigurationValidation;
+import com.vigilx.pages.MasterDataPage;
 import com.vigilx.pages.NotificationRulesPage;
 import com.vigilx.pages.OrganizationData;
 import com.vigilx.pages.OrganizationPage;
@@ -44,6 +46,7 @@ import com.vigilx.pages.RolesPage;
 import com.vigilx.pages.SequencePage;
 import com.vigilx.pages.UserData;
 import com.vigilx.pages.UsersRolesPage;
+import com.vigilx.pages.VmsOperatorSidebarPage;
 import com.vigilx.pages.ProjectHierarchyValidation;
 import com.vigilx.pages.ReportsValidation;
 import com.vigilx.reporting.SoakConsolidatedReportGenerator;
@@ -222,12 +225,30 @@ public final class SoakHealthCheckRunner {
             if (config.alertEnabled()) {
                 Path alertScreenshot = evidence.resolve("screenshots/video-alert-failure.png");
                 LOG.info("[SOAK] Alerts V1 and Video Alert validation started");
-                boolean alertPassed = healthPages.validateAlerts(appUrl, alertScreenshot);
+                // Unlike every other check in this method, this one is not routed through
+                // validatePage() (it needs its own WARN-vs-FAIL semantics for
+                // soak.alert.required=false, which validatePage()'s PASS/FAIL status does not
+                // have), so it has no try/catch of its own - confirmed to be a real bug: an
+                // uncaught RuntimeException here (validatePage() catches exactly this on every
+                // other page) would propagate out of this whole method's try block and abort the
+                // ENTIRE remaining run, silently skipping Reports, Organisation and everything
+                // after - not a page-level FAIL, a total stop. Caught locally instead so a broken
+                // Alerts check costs only its own result, never the rest of the soak.
+                boolean alertPassed;
+                String alertException = null;
+                try {
+                    alertPassed = healthPages.validateAlerts(appUrl, alertScreenshot);
+                } catch (RuntimeException exception) {
+                    alertPassed = false;
+                    alertException = exception.getMessage();
+                    LOG.error("[SOAK] Alerts V1 and Video Alert validation threw: {}", exception.getMessage(),
+                            exception);
+                }
                 // soak.alert.required=false was never honoured: a video alert that carries only
                 // images still failed the whole run. The status must not start with FAIL, since
                 // that is what marks the run failed further down.
                 String alertStatus = alertPassed ? "PASS"
-                        : config.alertRequired() ? "FAIL"
+                        : config.alertRequired() ? "FAIL" + (alertException != null ? ": " + alertException : "")
                                 : "WARN: Video Alert validation failed (soak.alert.required=false)";
                 result.alerts = alertPassed ? "PASS" : config.alertRequired() ? "FAIL" : "WARN";
                 result.pageResults.put("Alerts V1 and Video Alert", alertStatus);
@@ -249,34 +270,92 @@ public final class SoakHealthCheckRunner {
 
             validatePage(page, result, "License", healthPages::validateSettings);
 
-            // Application Settings -> Infra Management -> Application Settings -> Device:
-            // dynamically toggles "Enable QC" and "Enable VA Alerts". Runs after License, before
-            // Users & Roles / Organisation. Config-gated; additive.
-            if (config.applicationSettingsEnabled()) {
-                InfraPage infra = new InfraPage(page);
-                if (infra.open()) {
-                    ApplicationSettingsPage applicationSettings = infra.openApplicationSettings();
-                    if (applicationSettings.openDevice()) {
-                        validatePage(page, result, "Application Settings - Enable QC",
-                                applicationSettings::validateEnableQc);
-                        validatePage(page, result, "Application Settings - Enable VA Alerts",
-                                applicationSettings::validateEnableVaAlerts);
-                        // Device -> Notification Rules: random toggle OFF/ON checks. Additive; runs
-                        // before Users & Roles, which follows unchanged.
-                        if (Boolean.parseBoolean(
-                                ConfigReader.getOrDefault("soak.enable.notification.rules", "true"))) {
-                            NotificationRulesPage notificationRules = new NotificationRulesPage(page);
-                            validatePage(page, result, "Application Settings - Notification Rules",
-                                    notificationRules::runNotificationRulesFlow);
-                        }
-                    }
+            // Application Settings (Infra Management -> Application Settings -> Device: "Enable QC" /
+            // "Enable VA Alerts" / Notification Rules) used to run right here, immediately after
+            // "Open settings" - confirmed live via a real recording to be a real bug: it navigated
+            // straight to Infra Management before Organisation ever got a chance to run, instead of
+            // the recorded page-by-page order (Settings -> Organisation -> ... -> About -> Infra
+            // Management). It now runs at the very end of this whole Settings walk, right alongside
+            // Infra Management's own NAS/SAN/Cloud/FTP buttons - see "Infra Management" below,
+            // after Master Data - About.
+
+            validatePage(page, result, "Organisation", healthPages::validateOrganisation);
+            // Settings -> Organisation -> Profile: uploads a new organization logo (guaranteeing no
+            // leftover crop window - including the native OS file-picker a headed browser would
+            // otherwise pop open), then updates Admin Details / Primary Contact (once saved
+            // unchanged, once with a new Last Name) / Address Details, verifying each save's toast
+            // and the value actually shown afterward. Runs right after the existing Organisation
+            // check above (which lands on this same page and is left untouched) and reuses the
+            // existing OrganizationPage class rather than creating a new one. Additive and
+            // config-gated. Runs before Users & Roles now (reordered to match the recorded
+            // page-by-page walk: Settings -> Organisation -> Users & Roles -> Configuration ->
+            // Master Data -> Infra Management) - the Users & Roles block below is otherwise
+            // untouched.
+            if (config.organisationLogoEnabled()) {
+                OrganizationPage organisation = new OrganizationPage(page);
+                OrganizationData organizationData = new OrganizationData(
+                        ConfigReader.getOrDefault("organisation.logo.path", "src/test/resources/Logo.jpg"),
+                        ConfigReader.getOrDefault("organisation.admin.last.name", "kumar"),
+                        ConfigReader.getOrDefault("organisation.primary.contact.last.name", "Kumar update"),
+                        ConfigReader.getOrDefault("organisation.address.line1",
+                                "1 Railway Station Road, Madhira Bazar, Hyderabad, Telangana."),
+                        ConfigReader.getOrDefault("organisation.address.line2",
+                                "1 Station Road, Madhira Bazar 11, Hyderabad."));
+                validatePage(page, result, "Organisation - Update Details",
+                        () -> organisation.runOrganizationUpdateFlow(organizationData));
+
+                // Settings -> Organisation -> Project Information: a sibling tab of the Profile tab
+                // above - updates the project logo (same native-file-chooser-safe upload), then
+                // updates the Description field (twice), Project Admin Details' Last Name, and
+                // Address Details' Address Line 1. Runs right after the Organisation update above;
+                // a dedicated ProjectInformationPage class, independent of OrganizationPage.
+                if (config.projectInformationEnabled()) {
+                    ProjectInformationPage projectInformation = new ProjectInformationPage(page);
+                    ProjectInformationData projectInformationData = new ProjectInformationData(
+                            organizationData.logoPath(),
+                            ConfigReader.getOrDefault("project.information.description",
+                                    "Detect events in real time, integrate with other city systems, and route.a"),
+                            ConfigReader.getOrDefault("project.information.description.final",
+                                    "Detect events in real time, integrate with other city systems, and route. Update"),
+                            ConfigReader.getOrDefault("project.information.admin.last.name", "kumar - Update"),
+                            ConfigReader.getOrDefault("project.information.address.line1",
+                                    "Railway Station Road, Madhira Bazar, Hyderabad, Telangana. - Update"));
+                    validatePage(page, result, "Organisation - Project Information",
+                            () -> projectInformation.runProjectInformationFlow(projectInformationData));
+                }
+
+                // Settings -> Organisation -> License: opens "Activate New License", validates the
+                // background license-lookup API(s) it triggers, verifies the dialog's own content,
+                // and closes it again - never actually submits a license, per the requirement not
+                // to invent activation data. Runs right after Project Information above.
+                if (config.licenseValidationEnabled()) {
+                    LicensePage license = new LicensePage(page);
+                    validatePage(page, result, "Organisation - License", license::runLicenseValidationFlow);
+
+                    // Settings -> Organisation -> Audit Logs: this is the SAME AuditLogsPage class
+                    // built for Users & Roles -> Audit Logs earlier - its navigateToAuditLogs()
+                    // already works off any visible "Audit Logs" tab generically, so reusing it
+                    // here (a second, independent invocation) targets Organisation's own sibling
+                    // Audit Logs tab (next to License / Project Information) with no new code. The
+                    // "License" section is additionally selected within its own "Audit log
+                    // sections" tablist, confirmed live via a real recording.
+                    AuditLogsPage organisationAuditLogs = new AuditLogsPage(page);
+                    validatePage(page, result, "Organisation - Audit Logs Export",
+                            () -> organisationAuditLogs.runAuditLogsExportFlow("License"));
                 }
             }
 
             // Settings -> Users & Roles -> Users -> Add User -> full user lifecycle: creates one
             // user, verifies it, then runs its lifecycle (inactivate/activate/edit/delete). Runs
-            // after Application Settings, before the existing Users & Roles / Organisation checks
-            // (untouched). Config-gated; additive.
+            // after Organisation above, before Configuration / Master Data / Infra Management.
+            // Config-gated; additive.
+            validatePage(page, result, "Users & Roles", healthPages::validateUsersAndRoles);
+            // Settings -> Users & Roles -> User Hierarchy: this tab has no functionality of its own
+            // yet - navigation and page-load validation only, confirmed live via a real recording.
+            // Runs before the Create User lifecycle below, matching the recorded page-by-page order.
+            UsersRolesPage usersRolesNav = new UsersRolesPage(page);
+            validatePage(page, result, "Users & Roles - User Hierarchy",
+                    () -> usersRolesNav.navigateToUsersRoles() && usersRolesNav.navigateToUserHierarchyTab());
             if (config.userCreationEnabled()) {
                 UsersRolesPage usersRoles = new UsersRolesPage(page);
                 // Only the number after "+" in the configured email is replaced with a per-run unique
@@ -370,123 +449,158 @@ public final class SoakHealthCheckRunner {
                             auditLogs::runAuditLogsExportFlow);
                 }
             }
-            validatePage(page, result, "Users & Roles", healthPages::validateUsersAndRoles);
-            validatePage(page, result, "Organisation", healthPages::validateOrganisation);
-            // Settings -> Organisation -> Profile: uploads a new organization logo (guaranteeing no
-            // leftover crop window - including the native OS file-picker a headed browser would
-            // otherwise pop open), then updates Admin Details / Primary Contact (once saved
-            // unchanged, once with a new Last Name) / Address Details, verifying each save's toast
-            // and the value actually shown afterward. Runs right after the existing Organisation
-            // check above (which lands on this same page and is left untouched) and reuses the
-            // existing OrganizationPage class rather than creating a new one. Additive and
-            // config-gated.
-            if (config.organisationLogoEnabled()) {
-                OrganizationPage organisation = new OrganizationPage(page);
-                OrganizationData organizationData = new OrganizationData(
-                        ConfigReader.getOrDefault("organisation.logo.path", "src/test/resources/Logo.jpg"),
-                        ConfigReader.getOrDefault("organisation.admin.last.name", "kumar"),
-                        ConfigReader.getOrDefault("organisation.primary.contact.last.name", "Kumar update"),
-                        ConfigReader.getOrDefault("organisation.address.line1",
-                                "1 Railway Station Road, Madhira Bazar, Hyderabad, Telangana."),
-                        ConfigReader.getOrDefault("organisation.address.line2",
-                                "1 Station Road, Madhira Bazar 11, Hyderabad."));
-                validatePage(page, result, "Organisation - Update Details",
-                        () -> organisation.runOrganizationUpdateFlow(organizationData));
-
-                // Settings -> Organisation -> Project Information: a sibling tab of the Profile tab
-                // above - updates the project logo (same native-file-chooser-safe upload), then
-                // updates the Description field (twice), Project Admin Details' Last Name, and
-                // Address Details' Address Line 1. Runs right after the Organisation update above;
-                // a dedicated ProjectInformationPage class, independent of OrganizationPage.
-                if (config.projectInformationEnabled()) {
-                    ProjectInformationPage projectInformation = new ProjectInformationPage(page);
-                    ProjectInformationData projectInformationData = new ProjectInformationData(
-                            organizationData.logoPath(),
-                            ConfigReader.getOrDefault("project.information.description",
-                                    "Detect events in real time, integrate with other city systems, and route.a"),
-                            ConfigReader.getOrDefault("project.information.description.final",
-                                    "Detect events in real time, integrate with other city systems, and route. Update"),
-                            ConfigReader.getOrDefault("project.information.admin.last.name", "kumar - Update"),
-                            ConfigReader.getOrDefault("project.information.address.line1",
-                                    "Railway Station Road, Madhira Bazar, Hyderabad, Telangana. - Update"));
-                    validatePage(page, result, "Organisation - Project Information",
-                            () -> projectInformation.runProjectInformationFlow(projectInformationData));
-                }
-
-                // Settings -> Organisation -> License: opens "Activate New License", validates the
-                // background license-lookup API(s) it triggers, verifies the dialog's own content,
-                // and closes it again - never actually submits a license, per the requirement not
-                // to invent activation data. Runs right after Project Information above.
-                if (config.licenseValidationEnabled()) {
-                    LicensePage license = new LicensePage(page);
-                    validatePage(page, result, "Organisation - License", license::runLicenseValidationFlow);
-
-                    // Settings -> Organisation -> Audit Logs: this is the SAME AuditLogsPage class
-                    // built for Users & Roles -> Audit Logs earlier - its navigateToAuditLogs()
-                    // already works off any visible "Audit Logs" tab generically, so reusing it
-                    // here (a second, independent invocation) targets Organisation's own sibling
-                    // Audit Logs tab (next to License / Project Information) with no new code.
-                    AuditLogsPage organisationAuditLogs = new AuditLogsPage(page);
-                    validatePage(page, result, "Organisation - Audit Logs Export",
-                            organisationAuditLogs::runAuditLogsExportFlow);
+            // Settings -> Configuration: its default landing view is the exact same "Enable QC" /
+            // "Enable VA Alerts" feature already implemented in ApplicationSettingsPage (reached
+            // there via Infra Management -> Application Settings -> Device) - confirmed live via a
+            // real recording, so this reuses that existing implementation directly instead of a new,
+            // duplicate one. The E-mail / Health / Notification Rules / Scheduled Jobs / System
+            // Settings / Default Settings tabs that follow have no functional test of their own on
+            // this screen, so each of those is navigation and page-load validation only. Runs after
+            // Users & Roles, before Master Data. Config-gated; additive.
+            if (Boolean.parseBoolean(ConfigReader.getOrDefault("soak.enable.configuration", "true"))) {
+                ConfigurationPage configurationPage = new ConfigurationPage(page);
+                if (configurationPage.open()) {
+                    validatePage(page, result, "Configuration - Application Settings",
+                            configurationPage::exerciseApplicationSettings);
+                    validatePage(page, result, "Configuration - Health", configurationPage::exerciseHealthTab);
+                    validatePage(page, result, "Configuration - Notification Rules",
+                            configurationPage::exerciseNotificationRulesTab);
+                    validatePage(page, result, "Configuration - System Settings",
+                            configurationPage::exerciseSystemSettingsTab);
+                    validatePage(page, result, "Configuration - Default Settings",
+                            configurationPage::exerciseDefaultSettingsTab);
+                    validatePage(page, result, "Configuration - Tabs", configurationPage::visitAllTabs);
                 }
             }
 
-            // Settings -> QC: checklist section + checklist item lifecycle - create a section,
-            // add one item to it, verify both, rename the section and the item, delete the item,
-            // then delete the section (only after its item is gone). Runs after the Organisation ->
-            // Project Information -> License -> Audit Logs chain above. Additive and config-gated;
-            // independent of every other page class above, none of which it modifies.
-            if (config.qcChecklistEnabled()) {
-                QCPage qc = new QCPage(page);
-                // A run-unique suffix on both names, matching the same pattern already used for
-                // this session's own throwaway verification probes - prevents duplicate-name
-                // pile-up across repeated soak runs (confirmed live: earlier runs against a fixed
-                // "Testing" name left several undeleted "Testing"/"Testing-updated" sections behind
-                // whenever a run crashed or failed before reaching the delete steps, since the QC
-                // page has no way to tell those apart from a fresh run's own section by name alone).
-                String runSuffix = String.valueOf(System.currentTimeMillis() % 100000);
-                String sectionName = ConfigReader.getOrDefault("qc.checklist.section.name", "Testing") + " " + runSuffix;
-                QCSectionData newSection = new QCSectionData(sectionName,
-                        ConfigReader.getOrDefault("qc.checklist.section.description", "Testing description"));
-                QCSectionData updatedSection = new QCSectionData(
-                        sectionName + ConfigReader.getOrDefault("qc.checklist.section.update.name.suffix", "-updated"),
-                        ConfigReader.getOrDefault("qc.checklist.section.description", "Testing description")
-                                + ConfigReader.getOrDefault("qc.checklist.section.update.description.suffix", "-Updated"));
-                String itemName = ConfigReader.getOrDefault("qc.checklist.item.name", "Testing check list") + " " + runSuffix;
-                QCItemData newItem = new QCItemData(itemName);
-                QCItemData updatedItem = new QCItemData(
-                        itemName + ConfigReader.getOrDefault("qc.checklist.item.update.name.suffix", "-Update"));
-                validatePage(page, result, "QC - Checklist Lifecycle",
-                        () -> qc.runQCChecklistLifecycle(newSection, updatedSection, newItem, updatedItem));
+            // Settings -> Master Data -> Master Data: confirmed live via a real recording that this
+            // checklist section/item CRUD (previously reached via a separate "QC" nav link) now
+            // lives as the "Master Data" left-nav link's own landing content, so it runs first, right
+            // after Master Data opens - then the "Event Ack" tab, which (per a later recording) now
+            // also hosts the full Event Acknowledgement message CRUD lifecycle directly (previously
+            // reached via a separate "Event Check" left-nav path, now folded in here instead of
+            // running twice), then the separate, sibling "About" left-nav link - navigation and
+            // page-load validation only for that last one. Runs after Configuration, before Infra
+            // Management's own NAS/SAN/Cloud/FTP buttons. Config-gated; additive.
+            if (Boolean.parseBoolean(ConfigReader.getOrDefault("soak.enable.master.data", "true"))) {
+                MasterDataPage masterData = new MasterDataPage(page);
+                if (masterData.open()) {
+                    if (config.qcChecklistEnabled()) {
+                        QCPage qc = new QCPage(page);
+                        // A run-unique suffix on both names, matching the same pattern already used
+                        // for this session's own throwaway verification probes - prevents
+                        // duplicate-name pile-up across repeated soak runs (confirmed live: earlier
+                        // runs against a fixed "Testing" name left several undeleted
+                        // "Testing"/"Testing-updated" sections behind whenever a run crashed or
+                        // failed before reaching the delete steps, since the QC page has no way to
+                        // tell those apart from a fresh run's own section by name alone).
+                        String runSuffix = String.valueOf(System.currentTimeMillis() % 100000);
+                        String sectionName = ConfigReader.getOrDefault("qc.checklist.section.name", "Testing")
+                                + " " + runSuffix;
+                        QCSectionData newSection = new QCSectionData(sectionName,
+                                ConfigReader.getOrDefault("qc.checklist.section.description", "Testing description"));
+                        QCSectionData updatedSection = new QCSectionData(
+                                sectionName + ConfigReader.getOrDefault(
+                                        "qc.checklist.section.update.name.suffix", "-updated"),
+                                ConfigReader.getOrDefault("qc.checklist.section.description", "Testing description")
+                                        + ConfigReader.getOrDefault(
+                                                "qc.checklist.section.update.description.suffix", "-Updated"));
+                        String itemName = ConfigReader.getOrDefault("qc.checklist.item.name", "Testing check list")
+                                + " " + runSuffix;
+                        QCItemData newItem = new QCItemData(itemName);
+                        QCItemData updatedItem = new QCItemData(
+                                itemName + ConfigReader.getOrDefault("qc.checklist.item.update.name.suffix", "-Update"));
+                        validatePage(page, result, "Master Data - Checklist Lifecycle",
+                                () -> qc.runQCChecklistLifecycle(newSection, updatedSection, newItem, updatedItem));
+                    }
+                    validatePage(page, result, "Master Data - Event Ack", masterData::visitEventAckTab);
+                    if (config.eventAcknowledgementEnabled()) {
+                        EventAcknowledgementPage eventAck = new EventAcknowledgementPage(page);
+                        String eventSuffix = String.valueOf(System.currentTimeMillis());
+                        String eventName = ConfigReader.getOrDefault(
+                                "event.acknowledgement.message.name", "Testing Event") + " " + eventSuffix;
+                        // Separating space added in code, not carried by the config value - see the
+                        // identical note on the Group lifecycle's own update-name suffix above for why.
+                        String updatedEventName = eventName + " "
+                                + ConfigReader.getOrDefault("event.acknowledgement.update.name.suffix", "Update");
+                        validatePage(page, result, "Master Data - Event Acknowledgement Lifecycle",
+                                () -> eventAck.runEventAcknowledgementLifecycle(eventName, updatedEventName));
+                    }
+                    validatePage(page, result, "Master Data - About", masterData::visitAboutPage);
+                }
             }
 
-            // Settings -> Event Check -> Event Acknowledgement: create one message, verify it is
-            // listed, rename it, verify the rename, delete it, and verify it is gone - validating
-            // each operation's background API and success toast. Runs after the QC checklist
-            // lifecycle above. Additive and config-gated; independent of QCPage and every other
-            // page class above, none of which it modifies.
-            if (config.eventAcknowledgementEnabled()) {
-                EventAcknowledgementPage eventAck = new EventAcknowledgementPage(page);
-                String eventSuffix = String.valueOf(System.currentTimeMillis());
-                String eventName = ConfigReader.getOrDefault("event.acknowledgement.message.name", "Testing Event")
-                        + " " + eventSuffix;
-                // Separating space added in code, not carried by the config value - see the
-                // identical note on the Group lifecycle's own update-name suffix above for why.
-                String updatedEventName = eventName + " "
-                        + ConfigReader.getOrDefault("event.acknowledgement.update.name.suffix", "Update");
-                validatePage(page, result, "Event Acknowledgement - Lifecycle",
-                        () -> eventAck.runEventAcknowledgementLifecycle(eventName, updatedEventName));
+            // Settings -> Infra Management: the "NAS/SAN" / "Cloud" / "FTP" buttons on the page
+            // itself (distinct from the identically-named Backup-tab toggle switches in Master
+            // Configuration / Device Details, neither of which this touches), then Application
+            // Settings -> Device ("Enable QC" / "Enable VA Alerts" / Notification Rules toggles).
+            // Runs after Master Data - About - confirmed live via a real recording that this whole
+            // Infra Management area must run LAST in this Settings walk, not right after "Open
+            // settings" (which used to navigate straight here before Organisation ever got a chance
+            // to run - a real bug, now fixed by moving it here). Config-gated; additive.
+            if (Boolean.parseBoolean(ConfigReader.getOrDefault("soak.enable.infra.filters", "true"))) {
+                InfraPage infraFilters = new InfraPage(page);
+                if (infraFilters.open()) {
+                    validatePage(page, result, "Infra Management - Filters", infraFilters::exerciseInfraFilters);
+                }
             }
 
-            // Execution order under liveEnabled(): Live View (stream available) -> condition-bound
-            // 10s continuous stream monitoring -> Bookmark -> Snapshot -> remaining Live View tests
-            // (My View CRUD). Live_view confirms the stream comes up (single pass, no blind waits);
-            // LiveViewMonitor then owns the actual timed monitoring window - it already existed,
-            // fully built and config-driven (soak.liveview.monitor.seconds), but was never called
-            // from anywhere, so no real monitoring window was ever run. My View CRUD used to run
-            // BEFORE Bookmark/Snapshot; it now runs after them, per the requested order - nothing
-            // about what any of these steps DO has changed, only where in the sequence CRUD runs.
+            // Application Settings -> Device ("Enable QC" / "Enable VA Alerts" / Notification
+            // Rules toggles): still part of the same Infra Management area as the filters above,
+            // and still under Admin - runs here, before the VMS Operator role switch below, so no
+            // role restore is needed afterward (the whole VMS Operator walk now ends straight in
+            // Logout, matching the recorded flow exactly). Config-gated; unchanged otherwise.
+            if (config.applicationSettingsEnabled()) {
+                InfraPage infra = new InfraPage(page);
+                if (infra.open()) {
+                    ApplicationSettingsPage applicationSettings = infra.openApplicationSettings();
+                    if (applicationSettings.openDevice()) {
+                        validatePage(page, result, "Application Settings - Enable QC",
+                                applicationSettings::validateEnableQc);
+                        validatePage(page, result, "Application Settings - Enable VA Alerts",
+                                applicationSettings::validateEnableVaAlerts);
+                        // Device -> Notification Rules: random toggle OFF/ON checks.
+                        if (Boolean.parseBoolean(
+                                ConfigReader.getOrDefault("soak.enable.notification.rules", "true"))) {
+                            NotificationRulesPage notificationRules = new NotificationRulesPage(page);
+                            validatePage(page, result, "Application Settings - Notification Rules",
+                                    notificationRules::runNotificationRulesFlow);
+                        }
+                    }
+                }
+            }
+
+            // Infra Management -> profile menu role switch to "VMS Operator", then the full
+            // sidebar walk in the recorded page-by-page order (Cameras/Sequence/Audit Logs/Maps/
+            // Custom Maps/Archive/Search+Bookmarks/Exports+Snapshots/Audit Logs), ending straight
+            // in Logout - matching the recorded flow exactly, with no role restore and no
+            // Application Settings in between (that already ran above, under Admin).
+            //
+            // No separate "VMS Operator - Cameras/Sequence/Audit Logs/Archive/Search/Exports"
+            // navigation-only clicks here: confirmed live, every one of the real tests below
+            // already does its own navigation to reach its page - Live_view/SequencePage/
+            // AuditLogsPage all call their own page.navigate()/navigateTo() to a specific URL
+            // (SequencePage's navigateToSequence() even re-confirms VMS Operator mode and clicks
+            // "Cameras" -> "Sequence" itself), and EventSearchValidation/ArchiveExportValidation
+            // click their own "Search"/"Bookmarks"/"Exports"/"Snapshots" tabs directly. Adding a
+            // sidebar click immediately before each of these was a real, confirmed-live bug. not
+            // "exercising the sidebar" - clicking a button and then immediately navigating away
+            // from it via a fresh page.navigate() just forces an extra full page reload, which is
+            // exactly what was bouncing this flow back through Dashboard/Infra Management between
+            // pages. Only "Custom Maps" keeps its sidebar click below: it is the one screen with
+            // no self-navigating real test of its own.
+            VmsOperatorSidebarPage vmsOperatorSidebar = new VmsOperatorSidebarPage(page);
+            boolean vmsSidebarRoleSwitchEnabled = Boolean.parseBoolean(
+                    ConfigReader.getOrDefault("soak.enable.vms.operator.sidebar", "true"));
+            boolean switchedToVmsOperator = !vmsSidebarRoleSwitchEnabled
+                    || vmsOperatorSidebar.switchRole("VMS Operator");
+            if (vmsSidebarRoleSwitchEnabled) {
+                validatePage(page, result, "Infra Management - VMS Operator Role Switch",
+                        () -> switchedToVmsOperator);
+            }
+
+            // --- Cameras: Live View (stream available) -> condition-bound 10s continuous stream
+            // monitoring -> Snapshot -> Bookmark -> remaining Live View tests (My View CRUD). ---
             if (config.liveEnabled()) {
                 // Live View: waits only for the operator panel + camera tiles to become visible,
                 // then validates each stream once. No fixed delay before or after.
@@ -502,60 +616,71 @@ public final class SoakHealthCheckRunner {
                     captureFailureScreenshot(page, evidence, result, config, "live-view-failure.png");
                 }
 
-                // Continuous stream monitoring for the configured window (soak.liveview.monitor.seconds,
-                // default 10s): re-checks every camera's media state and any new API failure on a
-                // fixed interval until the deadline, then returns - never a blind extra wait once the
-                // window elapses. This is the actual "monitor the stream" requirement; Live View above
-                // already confirmed the stream comes up at all.
-                Page liveViewMonitorPage = page;
-                validatePage(page, result, "Live View - Stream Monitoring",
-                        () -> new LiveViewMonitor(liveViewMonitorPage).monitor().isPassed());
+                // Everything below needs a genuinely working Live View (a real camera streaming on
+                // the default grid) - Stream Monitoring just watches that same stream, and Snapshot/
+                // Bookmark/CRUD all act on "the current camera" on that same grid. When Live View
+                // itself already failed (no camera assigned, or its stream never came up), none of
+                // these can succeed either; running them anyway only pays each one's own full
+                // timeout for no result. So skip straight past this whole group and move on to
+                // Sequence, the next real test - never a blind wait on a camera that is not there.
+                if (liveViewPassed) {
+                    // Continuous stream monitoring for the configured window (soak.liveview.monitor.seconds,
+                    // default 10s): re-checks every camera's media state and any new API failure on a
+                    // fixed interval until the deadline, then returns - never a blind extra wait once the
+                    // window elapses. This is the actual "monitor the stream" requirement; Live View above
+                    // already confirmed the stream comes up at all.
+                    Page liveViewMonitorPage = page;
+                    validatePage(page, result, "Live View - Stream Monitoring",
+                            () -> new LiveViewMonitor(liveViewMonitorPage).monitor().isPassed());
 
-                // Snapshot (post-monitoring): LiveViewCrudPage's own navigateToLiveView() re-lands on
-                // the default Live View grid - a no-op when the page is already there (as it is here,
-                // since CRUD has not run yet), and needed once CRUD (below) starts leaving the page on
-                // its post-delete "My Views" list on later iterations.
-                LiveViewCrudPage liveViewBookmark = new LiveViewCrudPage(page);
-                liveViewBookmark.navigateToLiveView();
-                String snapshotName = "Testing Snapshot " + System.currentTimeMillis();
-                validatePage(page, result, "Live View - Snapshot",
-                    () -> liveViewBookmark.createSnapshotOnCurrentCamera(snapshotName));
+                    // Snapshot (post-monitoring): LiveViewCrudPage's own navigateToLiveView() re-lands on
+                    // the default Live View grid - a no-op when the page is already there (as it is here,
+                    // since CRUD has not run yet), and needed once CRUD (below) starts leaving the page on
+                    // its post-delete "My Views" list on later iterations.
+                    LiveViewCrudPage liveViewBookmark = new LiveViewCrudPage(page);
+                    liveViewBookmark.navigateToLiveView();
+                    String snapshotName = "Testing Snapshot " + System.currentTimeMillis();
+                    validatePage(page, result, "Live View - Snapshot",
+                        () -> liveViewBookmark.createSnapshotOnCurrentCamera(snapshotName));
 
-                // Bookmark (post-Snapshot): the same camera tile, right after Snapshot
-                // creation/validation above completes - no navigation, no re-selection. Structurally
-                // identical dialog to Snapshot's (confirmed live), so this reuses the SAME
-                // LiveViewCrudPage instance and its selectHumanDetectionType() helper - never a
-                // duplicated implementation.
-                String bookmarkName = "Testing Bookmark " + System.currentTimeMillis();
-                validatePage(page, result, "Live View - Bookmark",
-                        () -> liveViewBookmark.createBookmarkOnCurrentCamera(bookmarkName));
+                    // Bookmark (post-Snapshot): the same camera tile, right after Snapshot
+                    // creation/validation above completes - no navigation, no re-selection. Structurally
+                    // identical dialog to Snapshot's (confirmed live), so this reuses the SAME
+                    // LiveViewCrudPage instance and its selectHumanDetectionType() helper - never a
+                    // duplicated implementation.
+                    String bookmarkName = "Testing Bookmark " + System.currentTimeMillis();
+                    validatePage(page, result, "Live View - Bookmark",
+                            () -> liveViewBookmark.createBookmarkOnCurrentCamera(bookmarkName));
 
-                // Remaining Live View tests: "My Views -> Cameras" CRUD (My View create/update/
-                // delete) - create one view (unique name), change its grid layout, add/remove/re-add
-                // cameras from the device tree, save the configuration, save the view, rename it
-                // (update), then delete it. Runs immediately after Snapshot/Bookmark, per the
-                // requested order. LiveViewCrudPage remains a separate class from
-                // Live_view/LiveViewMonitor, neither of which it calls into.
-                if (config.liveViewCrudEnabled()) {
-                    LiveViewCrudPage liveViewCrud = new LiveViewCrudPage(page);
-                    String viewSuffix = String.valueOf(System.currentTimeMillis());
-                    String viewName = ConfigReader.getOrDefault("live.view.crud.name", "Live View") + " " + viewSuffix;
-                    String updatedViewName = viewName
-                            + ConfigReader.getOrDefault("live.view.crud.update.name.suffix", "-Update");
-                    String gridLayout = ConfigReader.getOrDefault("live.view.crud.grid.layout", "3x3");
-                    String[][] cameraPaths = parseCameraPaths(
-                            ConfigReader.getOrDefault("live.view.crud.camera.paths", ""));
-                    validatePage(page, result, "Live View - CRUD",
-                            () -> liveViewCrud.runLiveViewCrudFlow(viewName, updatedViewName, gridLayout, cameraPaths));
+                    // Remaining Live View tests: "My Views -> Cameras" CRUD (My View create/update/
+                    // delete) - create one view (unique name), change its grid layout, add/remove/re-add
+                    // cameras from the device tree, save the configuration, save the view, rename it
+                    // (update), then delete it. Runs immediately after Snapshot/Bookmark, per the
+                    // requested order. LiveViewCrudPage remains a separate class from
+                    // Live_view/LiveViewMonitor, neither of which it calls into.
+                    if (config.liveViewCrudEnabled()) {
+                        LiveViewCrudPage liveViewCrud = new LiveViewCrudPage(page);
+                        String viewSuffix = String.valueOf(System.currentTimeMillis());
+                        String viewName = ConfigReader.getOrDefault("live.view.crud.name", "Live View") + " " + viewSuffix;
+                        String updatedViewName = viewName
+                                + ConfigReader.getOrDefault("live.view.crud.update.name.suffix", "-Update");
+                        String gridLayout = ConfigReader.getOrDefault("live.view.crud.grid.layout", "3x3");
+                        String[][] cameraPaths = parseCameraPaths(
+                                ConfigReader.getOrDefault("live.view.crud.camera.paths", ""));
+                        validatePage(page, result, "Live View - CRUD",
+                                () -> liveViewCrud.runLiveViewCrudFlow(viewName, updatedViewName, gridLayout, cameraPaths));
+                    }
+                } else {
+                    LOG.warn("[SOAK] Live View failed (no working camera/stream); skipping Stream "
+                            + "Monitoring, Snapshot, Bookmark and CRUD, moving on to Sequence.");
                 }
             }
 
-            // Sequence: "VMS Operator -> Cameras -> Sequence". Create one sequence (unique name,
-            // requires at least 2 cameras - confirmed live) with cameras from the device tree,
-            // rename it, then delete it. Runs only after the existing Live View monitoring and its
-            // continuous camera/API validation above complete - never before, and never calling
-            // into Live_view or LiveViewCrudPage, both of which are left completely untouched.
-            // Additive and config-gated.
+            // --- Sequence: "VMS Operator -> Cameras -> Sequence". Create one sequence (unique
+            // name, requires at least 2 cameras - confirmed live) with cameras from the device
+            // tree, rename it, then delete it. SequencePage.navigateToSequence() reaches this
+            // screen entirely on its own (own page.navigate(), own operator-mode check, own
+            // "Cameras"/"Sequence" clicks) - no separate sidebar step needed here. ---
             if (config.sequenceEnabled()) {
                 SequencePage sequence = new SequencePage(page);
                 String sequenceSuffix = String.valueOf(System.currentTimeMillis());
@@ -569,12 +694,11 @@ public final class SoakHealthCheckRunner {
                         () -> sequence.runSequenceLifecycle(sequenceName, updatedSequenceName, sequenceCameraPaths));
             }
 
-            // Audit Logs (post-Sequence): reuses the existing AuditLogsPage untouched export flow,
-            // then searches for a run-unique value expected to match nothing (verifying "No records
-            // found"), then best-effort searches a known-existing term. Runs only after the Sequence
-            // lifecycle above completes - never before it. Additive and config-gated; independent of
-            // the earlier Audit Logs Export checks elsewhere in this runner (a separate flag), which
-            // are untouched.
+            // --- Audit Logs (post-Sequence): reuses the existing AuditLogsPage untouched export
+            // flow, then searches for a run-unique value expected to match nothing (verifying "No
+            // records found"), then best-effort searches a known-existing term. Its own
+            // navigateToLiveViewAuditLogs() reaches this screen via its own page.navigate() - no
+            // separate sidebar step needed here. ---
             if (config.auditLogsSearchEnabled()) {
                 AuditLogsPage auditLogsSearch = new AuditLogsPage(page);
                 String nonExistentSearchTerm = ConfigReader.getOrDefault("audit.logs.search.nonexistent.term",
@@ -584,8 +708,18 @@ public final class SoakHealthCheckRunner {
                         () -> auditLogsSearch.runAuditLogsSearchFlow(nonExistentSearchTerm, existingSearchTerm));
             }
 
+            // --- Maps + Custom Maps: "Map"/"Map Camera Validation" already self-navigate to
+            // /live-views/maps, so they run first, before the "Custom Maps" sidebar nav (which
+            // clicks "Maps" itself first, as a submenu-reveal step - not a repeat of this test). ---
             validatePage(page, result, "Map", () -> healthPages.validateMap(appUrl));
             validatePage(page, result, "Map Camera Validation", () -> healthPages.validateMapCameras(appUrl));
+            // No separate "Maps" step here: visitCustomMaps() below already clicks "Maps" itself
+            // first (required to reveal the "Custom Maps" submenu) - an extra standalone click here
+            // would just click the same "Maps" button twice in a row.
+            validatePage(page, result, "VMS Operator - Custom Maps", vmsOperatorSidebar::visitCustomMaps);
+
+            // --- Archive: validateArchive() reaches this screen via its own navigateTo() - no
+            // separate sidebar step needed here. ---
             validatePage(page, result, "Archive", () -> healthPages.validateArchive(appUrl));
             // Archive Camera Validation already does the whole flow in one pass: open Add Camera,
             // filter to Active, pick one random online device, add it once, then watch its stream for
@@ -600,12 +734,12 @@ public final class SoakHealthCheckRunner {
                 result.playbackStartupTimeMs = (System.nanoTime() - playbackStarted) / 1_000_000;
             }
 
-            // Event Search (Archive's own "Search"/Events tab): set a From/To date range wide
-            // enough to span two months (confirmed live: a single-month range never enables the
-            // calendar's own Apply), verify at least one result comes back, select one dynamically,
-            // and confirm its video actually plays. Runs only after Archive Camera Validation above
-            // - never before it, and never modifying ArchiveValidation itself (a separate class).
-            // Additive and config-gated.
+            // --- Search (+Bookmarks): Event Search (Archive's own "Search"/Events tab) - set a
+            // From/To date range wide enough to span two months (confirmed live: a single-month
+            // range never enables the calendar's own Apply), verify at least one result comes
+            // back, select one dynamically, and confirm its video actually plays. Then Bookmark
+            // Search, the same panel's "Bookmarks" tab. EventSearchValidation clicks "Search"/
+            // "Bookmarks" itself - no separate sidebar step needed here. ---
             if (config.eventSearchEnabled()) {
                 EventSearchValidation eventSearch = new EventSearchValidation(page);
                 validatePage(page, result, "Event Search", eventSearch::validateEventSearch);
@@ -616,43 +750,41 @@ public final class SoakHealthCheckRunner {
                 // duplicated for this, just given a second entry point. Runs only after Event Search
                 // above completes.
                 validatePage(page, result, "Bookmark Search", eventSearch::validateBookmarkSearch);
-
-                // Archive Export: Archive -> Exports -> select one export record dynamically ->
-                // Preview -> verify the preview video -> Download -> verify the downloaded file.
-                // Reuses the existing SoakUiUtils download mechanism (no second download
-                // implementation). Runs only after Event Search and Bookmark Search above complete -
-                // never modifying either of those, or ArchiveValidation. Additive and config-gated.
-                if (config.archiveExportEnabled()) {
-                    ArchiveExportValidation archiveExport = new ArchiveExportValidation(page);
-                    validatePage(page, result, "Archive Export", archiveExport::validateArchiveExport);
-
-                    // Archive Export - Snapshots: the same Exports tab's own "Snapshots" tab,
-                    // reusing the same ArchiveExportValidation instance and every shared helper it
-                    // already has (row discovery, dialog closing, download/file verification, Logs
-                    // search/clear, delete confirmation) - never a duplicated implementation, and
-                    // never modifying the Video Export flow above. Runs only after Archive Export
-                    // (Video) completes. Same config flag - no new flag needed, matching the
-                    // Event/Bookmark Search precedent.
-                        validatePage(page, result, "Archive Export - Snapshots",
-                            archiveExport::validateArchiveSnapshotExport);
-
-                    // Audit Logs (post-Snapshot): the Archive page's own "Audit Logs" navigation
-                    // button (a sibling of "Exports"), landing on /live-views/archive/audit-logs -
-                    // a distinct screen from both AuditLogsPage's Settings and Live-View-sidebar
-                    // Audit Logs flows above, neither of which is modified. Deliberately minimal:
-                    // navigate -> clear filter -> export -> verify the downloaded file, reusing
-                    // AuditLogsPage's existing clearDateTimeFilter()/exportAuditLogs()/
-                    // verifyDownloadedFile() as-is. Runs only after Archive Export - Snapshots
-                    // above completes. Same config flag - no new flag needed.
-                        AuditLogsPage archiveAuditLogs = new AuditLogsPage(page);
-                        validatePage(page, result, "Audit Logs - Archive Export",
-                            archiveAuditLogs::runArchiveAuditLogsExportFlow);
-                }
             }
 
-            // Archive/Event Search/Bookmark Search/Archive Export are the last validations; logout
-            // follows immediately. Settings, Users & Roles and Organisation already ran once above, so they
-            // are not repeated here.
+            // --- Exports (+Snapshots): Archive Export - Archive -> Exports -> select one export
+            // record dynamically -> Preview -> verify the preview video -> Download -> verify the
+            // downloaded file. Reuses the existing SoakUiUtils download mechanism (no second
+            // download implementation). Then Archive Export - Snapshots, the same Exports tab's
+            // "Snapshots" tab, reusing the same ArchiveExportValidation instance and every shared
+            // helper it already has. Same config flag as Event/Bookmark Search - no new flag
+            // needed, matching that precedent. ArchiveExportValidation clicks "Exports"/
+            // "Snapshots" itself - no separate sidebar step needed here. ---
+            if (config.eventSearchEnabled() && config.archiveExportEnabled()) {
+                ArchiveExportValidation archiveExport = new ArchiveExportValidation(page);
+                validatePage(page, result, "Archive Export", archiveExport::validateArchiveExport);
+                validatePage(page, result, "Archive Export - Snapshots",
+                        archiveExport::validateArchiveSnapshotExport);
+            }
+
+            // --- Audit Logs (Archive, second occurrence): the Archive page's own "Audit Logs"
+            // navigation button (a sibling of "Exports"), landing on
+            // /live-views/archive/audit-logs - a distinct screen from both AuditLogsPage's
+            // Settings and Live-View-sidebar Audit Logs flows above, neither of which is
+            // modified. Deliberately minimal: navigate -> clear filter -> export -> verify the
+            // downloaded file, reusing AuditLogsPage's existing clearDateTimeFilter()/
+            // exportAuditLogs()/verifyDownloadedFile() as-is. Same config flags as above - no new
+            // flag needed. Its own navigateToArchiveAuditLogs() reaches this screen via its own
+            // page.navigate() - no separate sidebar step needed here. ---
+            if (config.eventSearchEnabled() && config.archiveExportEnabled()) {
+                AuditLogsPage archiveAuditLogs = new AuditLogsPage(page);
+                validatePage(page, result, "Audit Logs - Archive Export",
+                        archiveAuditLogs::runArchiveAuditLogsExportFlow);
+            }
+
+            // Full VMS Operator sidebar walk complete - straight to Logout, matching the recorded
+            // flow exactly (no role restore, no Application Settings here: that already ran
+            // earlier, under Admin, before the role switch above - see there for why).
             if (config.logoutEnabled()) {
                 LOG.info("[SOAK] Logout started");
                 if (dashboard.logoutSafely(appUrl)) {
@@ -780,6 +912,12 @@ public final class SoakHealthCheckRunner {
         LOG.info("[SOAK] {} validation started", name);
         // Defensive: a stray earlier capture should never be mistaken for this check's own evidence.
         ScreenshotUtils.clearLastCapturedScreenshot();
+
+        // Session-resume, proactive case: a long soak run can hit a session timeout (or an earlier
+        // step's action can unexpectedly end the session - confirmed live, this has happened) between
+        // one check and the next. A no-op when the session is already active.
+        ensureLoggedIn(page);
+
         PageApiTracker tracker = PageApiTracker.start(page, name);
         boolean uiPassed = false;
         String uiError = null;
@@ -790,6 +928,28 @@ public final class SoakHealthCheckRunner {
             uiError = exception.getMessage();
             uiException = exception;
             LOG.error("[SOAK] {} validation failed: {}", name, exception.getMessage(), exception);
+        }
+
+        // Session-resume, reactive case: the session was ended DURING this check, not before it -
+        // detected by the check having failed and the login screen now showing. Log back in and
+        // retry this exact check once - "resume from where it stopped" at the granularity this
+        // page-object-per-check architecture supports - rather than restarting the whole run or
+        // letting every remaining check fail against a dead session.
+        if (!uiPassed && isOnLoginPage(page)) {
+            LOG.warn("[SOAK] {} - session was logged out mid-check; logging back in and retrying", name);
+            if (ensureLoggedIn(page)) {
+                tracker = PageApiTracker.start(page, name);
+                uiError = null;
+                uiException = null;
+                try {
+                    uiPassed = check.validate();
+                } catch (RuntimeException exception) {
+                    uiError = exception.getMessage();
+                    uiException = exception;
+                    LOG.error("[SOAK] {} validation failed after re-login retry: {}", name,
+                            exception.getMessage(), exception);
+                }
+            }
         }
 
         // Always drain the page's APIs, even when the UI check already failed. The UI outcome is
@@ -831,6 +991,38 @@ public final class SoakHealthCheckRunner {
 
         LOG.info("[SOAK] {} validation completed | status={} | apiRequests={} apiFailed={} apiTimeouts={}",
                 name, status, apiResult.requests(), apiResult.failed(), apiResult.timeouts());
+    }
+
+    /** True when the login form (username field + "Login" button) is currently on screen. */
+    private static boolean isOnLoginPage(Page page) {
+        try {
+            LoginPage loginPage = new LoginPage(page);
+            return loginPage.isUsernameDisplayed() && loginPage.isLoginButtonDisplayed();
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    /**
+     * Logs back in if (and only if) the login screen is currently showing - a no-op returning
+     * {@code true} immediately when the session is already active. Called both proactively (right
+     * before every check) and reactively (right after a check fails, in case the session died mid-
+     * check), so a soak run that hits a session timeout or an unexpected logout resumes from
+     * whichever check was running instead of every remaining check failing against a dead session.
+     */
+    private static boolean ensureLoggedIn(Page page) {
+        if (!isOnLoginPage(page)) {
+            return true;
+        }
+        try {
+            LOG.warn("[SOAK] Session appears logged out; logging back in.");
+            new LoginPage(page).login(ConfigReader.get("username"), ConfigReader.get("password"));
+            LOG.info("[SOAK] Re-login completed; resuming.");
+            return true;
+        } catch (Exception exception) {
+            LOG.error("[SOAK] Re-login failed: {}", exception.getMessage());
+            return false;
+        }
     }
 
     /** When true (default) a page's API failures fail the page; otherwise they are report-only. */

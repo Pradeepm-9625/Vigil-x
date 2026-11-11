@@ -48,8 +48,11 @@ import com.vigilx.utils.SecretMasker;
  */
 public final class ApiMonitor {
 
-    /** Statuses treated as successful; everything else is recorded. */
-    private static final Set<Integer> EXPECTED_STATUSES = Set.of(200, 201, 204);
+    /** Statuses treated as successful; everything else is recorded. 206 (Partial Content) is a
+     *  normal, successful response to a byte-range request - confirmed live via a real media
+     *  export preview (the Infra Management -&gt; VMS Operator "Exports" panel's own thumbnails),
+     *  not a failure. */
+    private static final Set<Integer> EXPECTED_STATUSES = Set.of(200, 201, 204, 206);
 
     /** Codes always listed in the summary, even when their count is zero. */
     private static final int[] SUMMARY_STATUSES =
@@ -984,7 +987,7 @@ public final class ApiMonitor {
                     .append("API MONITORING RESULT").append(System.lineSeparator())
                     .append(SEPARATOR).append(System.lineSeparator())
                     .append("No failed API responses detected.").append(System.lineSeparator())
-                    .append("Expected statuses: 200, 201, 204").append(System.lineSeparator())
+                    .append("Expected statuses: 200, 201, 204, 206").append(System.lineSeparator())
                     .append(SEPARATOR).append(System.lineSeparator())
                     .append(System.lineSeparator());
         } else {
@@ -1073,7 +1076,7 @@ public final class ApiMonitor {
                 .append(SUB_SEPARATOR).append(System.lineSeparator())
                 .append(System.lineSeparator());
 
-        for (int status : new int[] {200, 201, 204}) {
+        for (int status : new int[] {200, 201, 204, 206}) {
             summary.append(formatCount(status, statusCount(status)));
         }
         for (int status : SUMMARY_STATUSES) {

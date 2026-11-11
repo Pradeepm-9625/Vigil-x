@@ -71,8 +71,20 @@ public class ApiLoadTestExecutionTest {
                 harFile, ApiMonitor.getInventoryLogFile());
 
         ApiExecutionPolicy policy = ApiExecutionPolicy.loadDefault();
+        String loginPath = ConfigReader.getOrDefault("apisecurity.auth.login.path", "/auth/login");
         List<ApiDefinition> testedApis = inventory.combined.stream()
                 .filter(policy::isEligibleForNegativeTest)
+                // The captured login call itself is never replayed here: this run already shares ONE
+                // real token (obtained via ApiAuthClient.login() below) across every virtual user
+                // specifically because /auth/login is rate-limited (confirmed: 5 attempts/window) -
+                // replaying the captured login sampler too (with its own masked/invalid password)
+                // burns that same budget and, confirmed live via the run's own JTL timestamps, trips
+                // the server's repeated-failed-login defense hard enough to invalidate the already-
+                // valid shared token mid-run, cascading into 401s on every other endpoint for the rest
+                // of the run (92 of 155 failures in one run traced directly to this). JmeterPerformanceTest
+                // gets this exclusion for free from its GET-only policy; this all-methods test needs it
+                // stated explicitly.
+                .filter(definition -> !definition.normalizedPath().equals(loginPath))
                 .toList();
 
         if (testedApis.isEmpty()) {

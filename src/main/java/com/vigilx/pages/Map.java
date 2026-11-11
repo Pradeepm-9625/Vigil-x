@@ -487,6 +487,15 @@ public class Map extends BasePage {
         }
 
         private void closeMapLivePreview() {
+                // Escape is only meaningful when a preview is actually open - also called from the
+                // catch-all exception path, where a failure can land here before any video ever
+                // appeared. Pressing it unconditionally in that case has nothing of this page's own
+                // to close, so it can fall through to the app's own global shortcut and navigate away
+                // to the Dashboard instead - confirmed live. Only press it when a video element is
+                // actually present.
+                if (page.locator("video").count() == 0) {
+                        return;
+                }
                 page.keyboard().press("Escape");
         }
 }

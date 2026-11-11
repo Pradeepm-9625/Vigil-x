@@ -81,6 +81,65 @@ public class AuditLogsPage extends BasePage {
     }
 
     /**
+     * Same as {@link #runAuditLogsExportFlow()}, but additionally selects {@code section} within the
+     * "Audit log sections" tablist right after navigating - confirmed live via a real recording:
+     * Organisation's own Audit Logs tab nests a second, inner tablist (e.g. a "License" section,
+     * distinct from Users &amp; Roles' audit logs, which has none) letting the log be scoped to one
+     * part of Settings. A missing tablist or section tab is a clean skip (older builds, or a screen
+     * that genuinely has none), never a failure of the rest of the flow.
+     */
+    public boolean runAuditLogsExportFlow(String section) {
+        boolean navigated = navigateToAuditLogs();
+        boolean sectionOk = navigated && selectAuditLogSection(section);
+        boolean pageOk = navigated && verifyAuditLogsPage();
+        boolean cleared = navigated && clearDateTimeFilter();
+        boolean clearedVerified = cleared && verifyDateTimeFilterCleared();
+        boolean exported = navigated && exportAuditLogs();
+        boolean fileOk = true;
+        boolean dataOk = true;
+        if (exported && lastDownload != null) {
+            Path saved = verifyDownloadedFile(lastDownload);
+            fileOk = saved != null;
+            dataOk = fileOk && verifyExportedAuditLogData(saved);
+        }
+        System.out.println("[AUDIT LOGS] Flow (section='" + section + "'): navigated=" + navigated
+                + " sectionSelected=" + sectionOk + " pageVerified=" + pageOk + " filterCleared=" + cleared
+                + " filterClearedVerified=" + clearedVerified + " exported=" + exported + " fileValid=" + fileOk
+                + " dataValid=" + dataOk);
+        return navigated && sectionOk && pageOk && clearedVerified && exported && fileOk && dataOk;
+    }
+
+    /**
+     * Clicks {@code sectionName} within the "Audit log sections" tablist (identified by its
+     * accessible label - {@code page.getByLabel('Audit log sections')} in the recorded flow), if
+     * present. A missing tablist or section tab is a clean skip, not a failure - older builds, or a
+     * screen with no such nested sections, both return {@code true} unchanged.
+     */
+    public boolean selectAuditLogSection(String sectionName) {
+        Locator sections = page.getByLabel("Audit log sections").first();
+        if (!SoakUiUtils.isVisibleQuietly(sections)) {
+            System.out.println("[AUDIT LOGS]   'Audit log sections' tablist not present; skipping.");
+            return true;
+        }
+        Locator tab = sections.getByRole(AriaRole.TAB,
+                new Locator.GetByRoleOptions().setName(sectionName).setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(tab, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[AUDIT LOGS]   '" + sectionName + "' section tab not present; skipping.");
+            return true;
+        }
+        try {
+            tab.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(400);
+            System.out.println("[AUDIT LOGS]   Audit log section '" + sectionName + "' selected.");
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[AUDIT LOGS]   Could not select audit log section '" + sectionName + "': "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+    }
+
+    /**
      * Additive entry point for the post-Sequence Audit Logs validation. Confirmed live via a real
      * recording: this is a DIFFERENT screen from {@link #navigateToAuditLogs()}'s Settings -&gt;
      * Users &amp; Roles -&gt; Audit Logs tab (used only by {@link #runAuditLogsExportFlow()} and its

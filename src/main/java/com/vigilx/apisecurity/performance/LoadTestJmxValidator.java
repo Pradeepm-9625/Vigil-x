@@ -84,7 +84,11 @@ public final class LoadTestJmxValidator {
             result.problems.add("No <HeaderManager> element found - authentication/headers may be missing.");
         }
 
-        result.responseAssertionCount = document.getElementsByTagName("ResponseAssertion").getLength();
+        // "Response assertions" here means the per-sampler expected-status check LoadTestPlanBuilder
+        // emits - a JSR223PostProcessor testname="Expected status NNN", not a JMeter ResponseAssertion
+        // (see LoadTestPlanBuilder.appendResponseAssertion() for why a real ResponseAssertion can't be
+        // used for this). Counting the old tag name here would silently read back 0 forever.
+        result.responseAssertionCount = countExpectedStatusChecks(document);
 
         // Every hashTree in a valid JMeter plan pairs 1:1 with the test-element sibling right before
         // it (TestPlan -> hashTree, ThreadGroup -> hashTree, each sampler -> hashTree, ...) - JMeter
@@ -96,5 +100,19 @@ public final class LoadTestJmxValidator {
         }
 
         return result;
+    }
+
+    /** Number of {@code JSR223PostProcessor} elements whose {@code testname} starts with "Expected status ". */
+    private static int countExpectedStatusChecks(Document document) {
+        NodeList postProcessors = document.getElementsByTagName("JSR223PostProcessor");
+        int count = 0;
+        for (int i = 0; i < postProcessors.getLength(); i++) {
+            Element element = (Element) postProcessors.item(i);
+            String testname = element.getAttribute("testname");
+            if (testname != null && testname.startsWith("Expected status ")) {
+                count++;
+            }
+        }
+        return count;
     }
 }

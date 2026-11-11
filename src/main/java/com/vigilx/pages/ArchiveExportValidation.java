@@ -568,8 +568,12 @@ public class ArchiveExportValidation extends BasePage {
      * month "today" falls.
      */
     private boolean openSnapshotDateRangeAndApply() {
-        Locator selectButtons = page.getByRole(AriaRole.BUTTON,
-                new Page.GetByRoleOptions().setName("Select").setExact(false));
+        // Matches either the initial "Select" placeholder or an already-applied date/time value -
+        // same fix as EventSearchValidation's own copy of this logic, for the same reason: confirmed
+        // live that this control's accessible name becomes the live timestamp once a range has
+        // already been applied, not "Select".
+        Locator selectButtons = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName(
+                Pattern.compile("Select|\\d{1,2}:\\d{2}\\s*(AM|PM)", Pattern.CASE_INSENSITIVE)));
         if (selectButtons.count() == 0) {
             System.err.println("[ARCHIVE EXPORT]   Snapshot 'Date & Time From' Select control not found.");
             return false;

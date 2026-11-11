@@ -60,9 +60,22 @@ public final class ZapDaemonManager {
 
         try {
             System.out.println("[ZAP] Starting daemon: " + jar.get());
+            // disablekey must follow whether a REAL key was actually configured (zap.api.key, normally
+            // set in config.local.properties - never committed): confirmed live, starting with
+            // disablekey=false while apiKey is blank (the default with no local override present)
+            // leaves ZAP enforcing a key that was never set to anything - every single request this
+            // framework then sends, including its own isRunning() readiness poll just below, gets
+            // rejected with "API key incorrect or not supplied" (visible in the daemon's own log) even
+            // though the daemon itself finishes booting in a few seconds, so ensureRunning() always
+            // timed out waiting for a response that could never arrive. disablekey=true is ZAP's own
+            // documented mode for unattended local automation exactly like this one; it only applies
+            // when no real key was configured, so an operator who does set a real zap.api.key keeps the
+            // existing, stricter disablekey=false behavior unchanged.
+            boolean hasRealApiKey = apiKey != null && !apiKey.isBlank();
             ProcessBuilder builder = new ProcessBuilder("java", "-Xmx512m", "-jar", jar.get().toString(),
                     "-daemon", "-host", address, "-port", String.valueOf(port),
-                    "-config", "api.key=" + apiKey, "-config", "api.disablekey=false")
+                    "-config", "api.key=" + apiKey,
+                    "-config", "api.disablekey=" + (hasRealApiKey ? "false" : "true"))
                     .directory(zapHome.toFile())
                     .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile()))
                     .redirectErrorStream(true);

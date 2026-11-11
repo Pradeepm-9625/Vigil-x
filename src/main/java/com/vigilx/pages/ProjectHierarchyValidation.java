@@ -2,11 +2,7 @@ package com.vigilx.pages;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.Locale;
-import java.util.Random;
 import java.util.regex.Pattern;
 
 import com.microsoft.playwright.Locator;
@@ -18,28 +14,21 @@ import com.vigilx.utils.ScreenshotUtils;
 import com.vigilx.utils.SoakUiUtils;
 
 /**
- * Robust, soak-safe validation of the Project Hierarchy tree: selects one random Node and one
- * random Site, then exercises each row's Rename -&gt; Save changes flow and validates the save API
- * resolves (pass or fail), screenshotting and logging any failure.
+ * Robust, soak-safe validation of the Project Hierarchy tree's own Create -&gt; Update -&gt; Delete
+ * lifecycle: creates one brand-new, uniquely-named Node, renames it, creates one brand-new,
+ * uniquely-named Site under that Node, renames the Site, then deletes the Site and the Node again -
+ * in that exact order (Create Node -&gt; Update Node -&gt; Create Site -&gt; Update Site -&gt; Delete Site
+ * -&gt; Delete Node), validating each step's background save/delete API.
  *
  * <p>Additional to {@link ApplicationHealthPage#validateProjectHierarchy}, which is left untouched
- * and is reused here (via {@link #open()}) instead of re-implementing the same navigation. Which
- * tree row is a Node vs a Site is discovered directly from each row's own "Open actions menu" (the
- * three-dot button): a "Rename Node" item means the row is a Node, "Rename Site" means a Site,
- * anything else (a Device row) is skipped - nothing about the tree shape is hardcoded, so one
- * shared method ({@link #editSelectedItem}) drives both flows instead of two near-duplicate ones.
- * A row whose kind is already satisfied is skipped immediately, before its menu is even opened, so
- * a tree dominated by one kind never wastes a full Rename/Save/API cycle re-editing rows the result
- * already has. The dialog-closing, toast-reading and click-and-wait-for-API logic all come from
- * {@link SoakUiUtils} rather than being copied again here.
+ * and is reused here (via {@link #open()}) instead of re-implementing the same navigation. The
+ * dialog-closing, toast-reading and click-and-wait-for-API logic all come from {@link SoakUiUtils}
+ * rather than being copied again here.
  *
- * <p>Read-only in effect: "Save changes" is clicked with the details left exactly as loaded (same
- * as the recorded flow), so no field value is ever changed - only the row's own Save action fires.
- *
- * <p>{@link #validateAuditLogs()} runs afterwards, on whichever row {@link #validateRandomNodeAndSite()}
- * left selected: opens the "Audit Logs" tab, searches it and validates the background search API plus
- * the rendered result (either the {@code no-data-image} empty state or real rows - both valid), clears
- * the search, then exercises the export control and confirms a real file download starts.
+ * <p>{@link #validateAuditLogs()} runs afterwards (unchanged by this class): opens the "Audit Logs"
+ * tab, searches it and validates the background search API plus the rendered result (either the
+ * {@code no-data-image} empty state or real rows - both valid), clears the search, then exercises
+ * the export control and confirms a real file download starts.
  *
  * <p>Contract: never throws into the caller. Every failure is logged, screenshotted under
  * {@code target/soak-test/screenshots/project-hierarchy} and returned as {@code false} so the soak
@@ -50,8 +39,6 @@ public class ProjectHierarchyValidation extends BasePage {
     private static final String SEP = "============================================================";
     private static final String DEFAULT_SCREENSHOT_DIRECTORY = "target/soak-test/screenshots/project-hierarchy";
     private static final int ELEMENT_TIMEOUT_MS = 8000;
-    /** Tree rows tried, at most, while looking for one Node and one Site row. */
-    private static final int MAX_ATTEMPTS = 12;
 
     private final Path screenshotDirectory;
 
@@ -60,9 +47,6 @@ public class ProjectHierarchyValidation extends BasePage {
         this.screenshotDirectory = Paths.get(ConfigReader.getOrDefault(
                 "project.hierarchy.screenshot.directory", DEFAULT_SCREENSHOT_DIRECTORY));
     }
-
-    /** One row's edit-and-save outcome. */
-    private record EditOutcome(String kind, String name, boolean passed) { }
 
     // ---------------------------------------------------------------------
     // Open
@@ -93,161 +77,461 @@ public class ProjectHierarchyValidation extends BasePage {
     // ---------------------------------------------------------------------
 
     /**
-     * Picks one random Node and one random Site from the tree (expanding collapsed branches as
-     * needed) and runs {@link #editSelectedItem} on each. Returns {@code true} only when both a
-     * Node and a Site were found and each Save was confirmed by its API.
+     * Runs the full Node/Site lifecycle in the exact required order: Create Node -&gt; Update Node
+     * -&gt; Create Site -&gt; Update Site -&gt; Delete Site -&gt; Delete Node. The Site is created
+     * under the newly created Node (not an arbitrary existing one), and both names get a per-run
+     * 6-digit timestamp suffix (same convention as user/group/role creation) so repeated runs never
+     * collide. Returns {@code true} only when every one of the six steps was confirmed by its own
+     * background API (or, when no matching API response is observed, a clear success toast/dialog
+     * close - same fallback the rest of this module already uses).
      */
     public boolean validateRandomNodeAndSite() {
         System.out.println(SEP);
-        System.out.println("PROJECT HIERARCHY VALIDATION - random Node + Site edit/save");
+        System.out.println("PROJECT HIERARCHY VALIDATION - Node/Site Create -> Update -> Delete lifecycle");
         System.out.println(SEP);
 
-        SoakUiUtils.expandCollapsedTreeNodes(page, 6, 20000);
+        String suffix = String.format("%06d", (System.currentTimeMillis() / 1000) % 1_000_000);
+        String nodeName = "Soak Node " + suffix;
+        String nodeUpdatedName = nodeName + " update";
+        String siteName = "Soak Site " + suffix;
+        String siteUpdatedName = siteName + " update";
 
-        List<Locator> items = treeItems();
-        Collections.shuffle(items, new Random(resolveSeed()));
-        System.out.println("[PROJECT HIERARCHY] " + items.size() + " tree row(s) available.");
-
-        EditOutcome nodeOutcome = null;
-        EditOutcome siteOutcome = null;
-        int attempts = 0;
-
-        for (Locator item : items) {
-            boolean needNode = nodeOutcome == null;
-            boolean needSite = siteOutcome == null;
-            if ((!needNode && !needSite) || attempts >= MAX_ATTEMPTS) {
-                break;
-            }
-            attempts++;
-            // Only the kind(s) still missing are worth a full Rename -> Save -> API cycle; a row
-            // whose kind is already satisfied is skipped immediately (see editSelectedItem), so a
-            // tree dominated by one kind never burns time re-editing rows the result already has.
-            EditOutcome outcome = editSelectedItem(item, needNode, needSite);
-            if (outcome == null) {
-                continue;
-            }
-            if ("Node".equalsIgnoreCase(outcome.kind()) && nodeOutcome == null) {
-                nodeOutcome = outcome;
-            } else if ("Site".equalsIgnoreCase(outcome.kind()) && siteOutcome == null) {
-                siteOutcome = outcome;
-            }
-        }
-
-        boolean nodeOk = nodeOutcome != null && nodeOutcome.passed();
-        boolean siteOk = siteOutcome != null && siteOutcome.passed();
+        boolean nodeCreated = createHierarchyItem("Node", nodeName, null);
+        boolean nodeUpdated = nodeCreated && renameHierarchyItem("Node", nodeName, nodeUpdatedName);
+        boolean siteCreated = nodeUpdated && createHierarchyItem("Site", siteName, nodeUpdatedName);
+        boolean siteUpdated = siteCreated && renameHierarchyItem("Site", siteName, siteUpdatedName);
+        // Delete Site before Delete Node regardless of whether the steps above all passed - a Site
+        // actually created under this run's Node must never be left behind just because, say, its
+        // own rename failed; it still exists and still needs cleaning up before the Node it lives
+        // under can be deleted. Only skipped when Create Site itself never ran/passed (there is then
+        // nothing to delete).
+        boolean siteDeleted = !siteCreated
+                || deleteHierarchyItem("Site", siteUpdated ? siteUpdatedName : siteName);
+        boolean nodeDeleted = !nodeCreated
+                || deleteHierarchyItem("Node", nodeUpdated ? nodeUpdatedName : nodeName);
 
         System.out.println(SEP);
-        System.out.println("PROJECT HIERARCHY RESULT (after " + attempts + " row(s) tried)");
-        System.out.println("Node : " + (nodeOutcome == null ? "NOT FOUND"
-                : nodeOutcome.name() + " -> " + (nodeOk ? "PASS" : "FAIL")));
-        System.out.println("Site : " + (siteOutcome == null ? "NOT FOUND"
-                : siteOutcome.name() + " -> " + (siteOk ? "PASS" : "FAIL")));
+        System.out.println("PROJECT HIERARCHY RESULT");
+        System.out.println("Create Node : " + (nodeCreated ? "PASS" : "FAIL") + " (" + nodeName + ")");
+        System.out.println("Update Node : " + (nodeUpdated ? "PASS" : "FAIL"));
+        System.out.println("Create Site : " + (siteCreated ? "PASS" : "FAIL") + " (" + siteName + ")");
+        System.out.println("Update Site : " + (siteUpdated ? "PASS" : "FAIL"));
+        System.out.println("Delete Site : " + (siteDeleted ? "PASS" : "FAIL"));
+        System.out.println("Delete Node : " + (nodeDeleted ? "PASS" : "FAIL"));
         System.out.println(SEP);
 
-        if (nodeOutcome == null) {
-            System.err.println("[PROJECT HIERARCHY] No Node row found to edit in " + attempts + " attempt(s).");
-        }
-        if (siteOutcome == null) {
-            System.err.println("[PROJECT HIERARCHY] No Site row found to edit in " + attempts + " attempt(s).");
-        }
-        return nodeOk && siteOk;
+        return nodeCreated && nodeUpdated && siteCreated && siteUpdated && siteDeleted && nodeDeleted;
     }
 
     // ---------------------------------------------------------------------
-    // Shared edit-and-save flow (Node and Site both go through this - no duplicate code)
+    // Create
     // ---------------------------------------------------------------------
 
     /**
-     * Opens one tree row's own "Open actions menu" (the three-dot button) and reads which
-     * {@code Rename <Kind>} item it offers - "Rename Node" means this row is a Node, "Rename Site"
-     * means a Site, anything else (a Device row, or none at all) is skipped immediately. This is
-     * the direct, per-row signal the app itself provides, so it replaces selecting the row and
-     * inferring its kind from a details panel - simpler and not dependent on that panel's own
-     * timing/rendering.
-     *
-     * <p>A row whose kind is already satisfied ({@code needNode}/{@code needSite} false for it) is
-     * also skipped immediately, before the menu is even opened - only a row that could still fill
-     * the missing Node or Site slot goes through the full Rename -&gt; Save -&gt; API cycle. Never
-     * throws: returns {@code null} for any row that does not end up contributing an outcome.
+     * Opens "Add {@code kind}" - from the Project root's own actions menu for a Node, or from the
+     * parent Node's own actions menu (named {@code parentNodeName}) for a Site - fills the dialog
+     * with disposable test data (none of it asserted on; only that Save succeeds matters here) and
+     * confirms via the background create API.
      */
-    private EditOutcome editSelectedItem(Locator item, boolean needNode, boolean needSite) {
-        String rowName = rowName(item);
-
-        Locator menuButton = item.getByLabel("Open actions menu").first();
-        if (menuButton.count() == 0) {
-            menuButton = item.locator(
-                    ".ph-v1-dynamic-tree-node__trailing .MuiButtonBase-root, .MuiTreeItem-content button").first();
-        }
-        if (menuButton.count() == 0) {
-            System.out.println("[PROJECT HIERARCHY]   '" + rowName + "' has no actions menu; skipping.");
-            return null;
-        }
-
-        try {
-            item.scrollIntoViewIfNeeded();
-            menuButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-        } catch (Exception exception) {
-            System.out.println("[PROJECT HIERARCHY]   '" + rowName + "' actions menu could not be opened; skipping.");
-            return null;
-        }
-
-        Locator renameItem = page.getByRole(AriaRole.MENUITEM, new Page.GetByRoleOptions()
-                .setName(Pattern.compile("^rename\\s+\\w+", Pattern.CASE_INSENSITIVE))).first();
-        if (!SoakUiUtils.waitVisible(renameItem, 3000)) {
-            System.out.println("[PROJECT HIERARCHY]   '" + rowName + "' offers no Rename Node/Site action; skipping.");
-            closeMenu();
-            return null;
+    private boolean createHierarchyItem(String kind, String name, String parentNodeName) {
+        Locator menuButton;
+        if (parentNodeName == null) {
+            Locator projectLink = page.getByRole(AriaRole.LINK,
+                    new Page.GetByRoleOptions().setName("Project Hierarchy Project").setExact(false)).first();
+            if (SoakUiUtils.waitVisible(projectLink, ELEMENT_TIMEOUT_MS)) {
+                try {
+                    projectLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                } catch (Exception ignored) {
+                    // The root menu button below is still reachable even if this breadcrumb click misses.
+                }
+            }
+            menuButton = page.locator(".MuiButtonBase-root").first();
+        } else {
+            Locator parentItem = findTreeItemByName(parentNodeName);
+            if (!SoakUiUtils.waitVisible(parentItem, ELEMENT_TIMEOUT_MS)) {
+                System.err.println("[PROJECT HIERARCHY]   Parent Node '" + parentNodeName
+                        + "' not found; cannot add " + kind + " '" + name + "'.");
+                return false;
+            }
+            parentItem.scrollIntoViewIfNeeded();
+            menuButton = parentItem.getByLabel("Open actions menu").first();
         }
 
-        String kind = renameKind(renameItem);
-        boolean isNode = "Node".equalsIgnoreCase(kind);
-        boolean isSite = "Site".equalsIgnoreCase(kind);
-        if (!isNode && !isSite) {
-            System.out.println("[PROJECT HIERARCHY]   '" + rowName + "' is a " + kind
-                    + " row; skipping (only Node and Site are in scope).");
-            closeMenu();
-            return null;
-        }
-        if ((isNode && !needNode) || (isSite && !needSite)) {
-            System.out.println("[PROJECT HIERARCHY]   '" + rowName + "' is a " + kind
-                    + " row; already have one, skipping.");
-            closeMenu();
-            return null;
-        }
-        System.out.println("[PROJECT HIERARCHY] Row '" + rowName + "' identified as " + kind
-                + " (via Rename " + kind + ").");
-
-        try {
-            renameItem.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-        } catch (Exception exception) {
-            System.err.println("[PROJECT HIERARCHY]   'Rename " + kind + "' for '" + rowName
-                    + "' could not be clicked: " + SoakUiUtils.firstLine(exception.getMessage()));
-            closeMenu();
-            return new EditOutcome(kind, rowName, false);
+        if (!clickMenuButtonAndItem(menuButton, "Add " + kind)) {
+            System.err.println("[PROJECT HIERARCHY]   'Add " + kind + "' could not be opened for '" + name + "'.");
+            return false;
         }
 
         Locator dialog = page.getByRole(AriaRole.DIALOG).first();
         if (!SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
-            capture("edit-" + SoakUiUtils.slug(kind) + "-dialog-not-open");
-            System.err.println("[PROJECT HIERARCHY]   Rename " + kind + " dialog did not open for '" + rowName + "'.");
-            SoakUiUtils.closeOpenDialogs(page);
-            return new EditOutcome(kind, rowName, false);
+            capture("create-" + SoakUiUtils.slug(kind) + "-dialog-not-open");
+            System.err.println("[PROJECT HIERARCHY]   Add " + kind + " dialog did not open for '" + name + "'.");
+            return false;
         }
 
-        // Straight to Save: no dialog-content/field-presence checks here - the dialog opening is
-        // already confirmed above, and the point of this flow is Edit -> Save -> validate the
-        // background API, not re-verifying form fields Save itself will surface as a failure.
+        fillHierarchyForm(dialog, kind, name);
+
+        // Confirmed live: this dialog's own footer button reads "Save", never "Save changes" -
+        // but exact=true still finds nothing, because (like Primary Contact's trigger) it nests an
+        // icon whose alt text gets folded into the real accessible name, making it something other
+        // than the literal visible text "Save" - exact=false (substring) is required here too.
         Locator saveButton = dialog.getByRole(AriaRole.BUTTON,
-                new Locator.GetByRoleOptions().setName("Save changes").setExact(false)).first();
-
-        // Brief settle wait: the dialog's own data can still be hydrating right after it opens,
-        // which was seen to occasionally let the very first Save click race ahead of the form
-        // actually being interactive (a later, identical click on another row succeeded cleanly).
+                new Locator.GetByRoleOptions().setName("Save").setExact(false)).first();
         page.waitForTimeout(800);
-        boolean passed = saveAndVerify(dialog, saveButton, kind, rowName);
-
+        boolean passed = saveAndVerify(dialog, saveButton, "create " + kind, name);
         SoakUiUtils.dismissDialog(page);
-        return new EditOutcome(kind, rowName, passed);
+        return passed;
+    }
+
+    /**
+     * Fills every field the Add/Rename {@code kind} dialog shares in common - Name, (Site only)
+     * Site Type, primary contact, Note, Country, State, City, Zip, Address, Timezone, and a
+     * best-effort map location - all disposable filler data, never verified afterwards (only that
+     * Save succeeds is checked by the caller).
+     */
+    private void fillHierarchyForm(Locator dialog, String kind, String name) {
+        Locator nameField = dialog.getByRole(AriaRole.TEXTBOX,
+                new Locator.GetByRoleOptions().setName(kind + " Name").setExact(false)).first();
+        try {
+            nameField.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            nameField.fill(name);
+        } catch (Exception exception) {
+            System.err.println("[PROJECT HIERARCHY]   '" + kind + " Name' could not be filled: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+        }
+
+        if ("Site".equalsIgnoreCase(kind)) {
+            selectVxddOption(dialog, "Select site type", null, "Station");
+        }
+
+        // Confirmed live: this environment's real contact list has no "Dont delete" entry (that
+        // was specific to a different environment's seed data) - picking whichever contact is
+        // first in the live list is the only name-agnostic way to satisfy this required field
+        // across environments, and which one is chosen is never asserted on afterwards.
+        selectVxddOption(dialog, "Select primary contact", null, null);
+
+        Locator noteField = dialog.getByRole(AriaRole.TEXTBOX,
+                new Locator.GetByRoleOptions().setName("Note").setExact(false)).first();
+        fillBestEffort(noteField, "test");
+
+        selectVxddOption(dialog, "Select country", "india", "India");
+        // State's trigger stays disabled ("Select country first") until Country's own choice
+        // finishes propagating (its state list depends on the chosen country) - a short settle
+        // delay here, not needed by Country/Primary Contact themselves, avoids querying for
+        // "Select state" before the button has actually switched over to it.
+        page.waitForTimeout(800);
+        selectVxddOption(dialog, "Select state", "tamil", "Tamil Nadu");
+
+        fillBestEffort(dialog.getByRole(AriaRole.TEXTBOX,
+                new Locator.GetByRoleOptions().setName("City").setExact(false)).first(), "Coimbatore");
+        fillBestEffort(dialog.getByRole(AriaRole.TEXTBOX,
+                new Locator.GetByRoleOptions().setName("Zip/Pin Code").setExact(false)).first(), "641045");
+        fillBestEffort(dialog.getByRole(AriaRole.TEXTBOX,
+                new Locator.GetByRoleOptions().setName("Address").setExact(false)).first(), "test street");
+
+        selectVxddOption(dialog, "Select timezone", "kolkata", "Asia/Kolkata");
+
+        bestEffortEditLocation(dialog);
+    }
+
+    /**
+     * Opens one of this app's own "vxdd" dropdowns ({@code triggerLabel}, e.g. "Select country")
+     * and picks an option from it. Confirmed live against the real markup: these dropdowns render
+     * their option list in a {@code .vxdd__menu--portal} panel appended as the LAST child of
+     * {@code <body>} - a sibling of the dialog, never inside it - and each option is a real
+     * {@code <button class="vxdd__item">}, not a role=listbox/option/menuitem element (all come
+     * back empty against the real app) and not a plain-text row either.
+     *
+     * <p>When {@code filterText} is given, it is typed into the panel's own search input (matched
+     * by its {@code vxdd__search-input} class, not by guessing an aria-label - this app's real
+     * search inputs are labelled "Search {field}", never "Select {field}") before picking, since
+     * some of these lists (Country, State, Timezone) are far too long to pick from unfiltered.
+     *
+     * <p>When {@code exactOptionText} is given, the option whose own text equals it (case
+     * -insensitive) is preferred; otherwise - or if no such option exists in this environment's
+     * live data - the first available option is clicked instead, so a required field (Primary
+     * Contact) is never left empty just because a specific name does not exist here.
+     */
+    private void selectVxddOption(Locator dialog, String triggerLabel, String filterText, String exactOptionText) {
+        // Exact match first (needed for Country, whose trigger prefix-collides with State's own
+        // disabled "Select country first" placeholder before Country is chosen) - falling back to
+        // a substring match for triggers whose accessible name picks up extra text Playwright
+        // includes but a human never reads, e.g. Primary Contact's trigger nests an icon with
+        // alt="chevron down", making its real accessible name "Select primary contact chevron
+        // down" - confirmed live, an exact match on just the visible label never found it.
+        Locator trigger = dialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName(triggerLabel).setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(trigger, 1500)) {
+            trigger = dialog.getByRole(AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName(triggerLabel).setExact(false)).first();
+        }
+        if (!SoakUiUtils.waitVisible(trigger, 3000)) {
+            System.out.println("[PROJECT HIERARCHY]   '" + triggerLabel + "' trigger not present; skipping.");
+            return;
+        }
+        try {
+            trigger.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[PROJECT HIERARCHY]   '" + triggerLabel + "' could not be opened: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return;
+        }
+
+        Locator portal = page.locator(".vxdd__menu--portal").last();
+        if (!SoakUiUtils.waitVisible(portal, 3000)) {
+            System.err.println("[PROJECT HIERARCHY]   '" + triggerLabel + "' dropdown did not open.");
+            return;
+        }
+
+        try {
+            if (filterText != null) {
+                Locator search = portal.locator("input.vxdd__search-input").first();
+                if (SoakUiUtils.waitVisible(search, 2000)) {
+                    search.fill(filterText);
+                    page.waitForTimeout(400);
+                }
+            }
+
+            Locator items = portal.locator("button.vxdd__item");
+            Locator target = items.first();
+            if (exactOptionText != null) {
+                Locator exactMatch = items.filter(new Locator.FilterOptions().setHasText(Pattern.compile(
+                        "^\\s*" + escapeRegex(exactOptionText) + "\\s*$", Pattern.CASE_INSENSITIVE))).first();
+                // Confirmed live: a long list (e.g. Country's ~250 entries) can still be fading/
+                // rendering in for a moment right after the portal itself reports visible - a single
+                // isVisibleQuietly() snapshot taken at that instant catches it mid-animation and
+                // reports not-visible even though the match is really there, silently falling back
+                // to the list's first entry ("None") instead of the real target. Polling (not a
+                // one-shot check) gives it the moment it needs to settle.
+                if (SoakUiUtils.waitVisible(exactMatch, 2000)) {
+                    target = exactMatch;
+                }
+            }
+
+            if (!SoakUiUtils.waitVisible(target, 3000)) {
+                System.err.println("[PROJECT HIERARCHY]   '" + triggerLabel + "' had no option to select.");
+                closeMenu();
+                return;
+            }
+            target.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[PROJECT HIERARCHY]   '" + triggerLabel + "' option could not be selected: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+        }
+    }
+
+    /**
+     * Best-effort only: opens the location sub-dialog and saves it - never fails the caller on its
+     * own, since whether a precise location was set is not what this flow validates (Save's own API
+     * outcome, checked separately, is the real gate). Deliberately just "Edit location" then "Save",
+     * exactly as verified live - the previous version also clicked a "Location pin" button and a
+     * {@code .location-map__map} element in between, neither of which matched anything real, which
+     * left the sub-dialog in a state the final Save click couldn't get past.
+     */
+    private void bestEffortEditLocation(Locator dialog) {
+        try {
+            Locator editLocation = dialog.getByRole(AriaRole.BUTTON,
+                    new Locator.GetByRoleOptions().setName("Edit location").setExact(false)).first();
+            if (!SoakUiUtils.waitVisible(editLocation, 3000)) {
+                return;
+            }
+            editLocation.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+
+            // .last(), not .first(): the Add Node dialog itself also has its own "Save" button, and
+            // this location sub-dialog - opened on top of it - is appended after it in the DOM, so
+            // .first() risks clicking the wrong (outer, currently covered) one. exact=false: same
+            // icon-in-accessible-name issue as the other triggers/buttons in this file.
+            Locator saveLocation = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Save").setExact(false)).last();
+            if (SoakUiUtils.waitVisible(saveLocation, 3000)) {
+                saveLocation.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            }
+        } catch (Exception exception) {
+            System.out.println("[PROJECT HIERARCHY]   Edit location skipped (best-effort): "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+        }
+    }
+
+    private void fillBestEffort(Locator field, String value) {
+        try {
+            if (SoakUiUtils.waitVisible(field, 3000)) {
+                field.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                field.fill(value);
+            }
+        } catch (Exception exception) {
+            System.out.println("[PROJECT HIERARCHY]   Field fill skipped (best-effort): "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Update (rename)
+    // ---------------------------------------------------------------------
+
+    /** Opens {@code currentName}'s own "Rename {@code kind}" action, fills the new name, Save changes. */
+    private boolean renameHierarchyItem(String kind, String currentName, String newName) {
+        Locator item = findTreeItemByName(currentName);
+        if (!SoakUiUtils.waitVisible(item, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[PROJECT HIERARCHY]   '" + currentName + "' not found; cannot rename.");
+            return false;
+        }
+        item.scrollIntoViewIfNeeded();
+        Locator menuButton = item.getByLabel("Open actions menu").first();
+        if (!clickMenuButtonAndItem(menuButton, "Rename " + kind)) {
+            System.err.println("[PROJECT HIERARCHY]   'Rename " + kind + "' could not be opened for '"
+                    + currentName + "'.");
+            return false;
+        }
+
+        Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+        if (!SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
+            capture("update-" + SoakUiUtils.slug(kind) + "-dialog-not-open");
+            System.err.println("[PROJECT HIERARCHY]   Rename " + kind + " dialog did not open for '"
+                    + currentName + "'.");
+            return false;
+        }
+
+        Locator nameField = dialog.getByRole(AriaRole.TEXTBOX,
+                new Locator.GetByRoleOptions().setName(kind + " Name").setExact(false)).first();
+        try {
+            nameField.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            nameField.fill(newName);
+        } catch (Exception exception) {
+            System.err.println("[PROJECT HIERARCHY]   '" + kind + " Name' could not be updated: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+        }
+
+        Locator saveButton = dialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName("Save").setExact(false)).first();
+        page.waitForTimeout(800);
+        boolean passed = saveAndVerify(dialog, saveButton, "update " + kind, newName);
+        SoakUiUtils.dismissDialog(page);
+        return passed;
+    }
+
+    // ---------------------------------------------------------------------
+    // Delete
+    // ---------------------------------------------------------------------
+
+    /** Opens {@code name}'s own "Delete {@code kind}" action and confirms it. */
+    private boolean deleteHierarchyItem(String kind, String name) {
+        Locator item = findTreeItemByName(name);
+        if (!SoakUiUtils.waitVisible(item, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[PROJECT HIERARCHY]   '" + name + "' not found; cannot delete.");
+            return false;
+        }
+        item.scrollIntoViewIfNeeded();
+        Locator menuButton = item.getByLabel("Open actions menu").first();
+        if (!clickMenuButtonAndItem(menuButton, "Delete " + kind)) {
+            System.err.println("[PROJECT HIERARCHY]   'Delete " + kind + "' could not be opened for '" + name + "'.");
+            return false;
+        }
+
+        Locator confirmButton = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Delete").setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(confirmButton, ELEMENT_TIMEOUT_MS)) {
+            capture("delete-" + SoakUiUtils.slug(kind) + "-confirm-not-open");
+            System.err.println("[PROJECT HIERARCHY]   Delete " + kind + " confirmation did not open for '"
+                    + name + "'.");
+            return false;
+        }
+
+        String toastBefore = SoakUiUtils.readToastText(page);
+        Response response = SoakUiUtils.clickAndWaitForResponse(
+                page, confirmButton, this::isProjectHierarchyWriteResponse, 15000);
+        String toast = waitForToast(toastBefore, 6000);
+
+        if (response != null) {
+            int status = response.status();
+            boolean pass = status >= 200 && status < 300;
+            System.out.println("[PROJECT HIERARCHY]   Delete " + kind + " API: " + safeMethod(response) + " "
+                    + shortPath(response.url()) + " -> " + status + " (" + (pass ? "PASS" : "FAIL") + ")"
+                    + (toast.isBlank() ? "" : " | toast: \"" + toast + "\""));
+            if (!pass) {
+                String shot = capture("delete-" + SoakUiUtils.slug(kind) + "-api-failed");
+                System.err.println("[PROJECT HIERARCHY]   Delete " + kind + " FAILED for '" + name
+                        + "' (HTTP " + status + "). Screenshot: " + (shot == null ? "<not captured>" : shot));
+            }
+            return pass;
+        }
+
+        boolean rowGone = !SoakUiUtils.isVisibleQuietly(findTreeItemByName(name).first());
+        boolean badToast = !toast.isBlank()
+                && Pattern.compile("fail|error|unable|could not", Pattern.CASE_INSENSITIVE).matcher(toast).find();
+        if (badToast) {
+            String shot = capture("delete-" + SoakUiUtils.slug(kind) + "-failed");
+            System.err.println("[PROJECT HIERARCHY]   Delete " + kind + " FAILED for '" + name
+                    + "' (toast: \"" + toast + "\"). Screenshot: " + (shot == null ? "<not captured>" : shot));
+            return false;
+        }
+        if (rowGone) {
+            System.out.println("[PROJECT HIERARCHY]   Delete " + kind + " confirmed (row '" + name
+                    + "' no longer present)" + (toast.isBlank() ? "" : " toast: \"" + toast + "\""));
+            return true;
+        }
+
+        String shot = capture("delete-" + SoakUiUtils.slug(kind) + "-unconfirmed");
+        System.err.println("[PROJECT HIERARCHY]   Delete " + kind + " for '" + name
+                + "' had no confirmation (no API match, no toast, row still present). Screenshot: "
+                + (shot == null ? "<not captured>" : shot));
+        return false;
+    }
+
+    // ---------------------------------------------------------------------
+    // Shared helpers
+    // ---------------------------------------------------------------------
+
+    /** The tree row whose accessible name starts with {@code name} (its own "Open actions menu" suffix excluded). */
+    private Locator findTreeItemByName(String name) {
+        SoakUiUtils.expandCollapsedTreeNodes(page, 6, 10000);
+        return page.getByRole(AriaRole.TREEITEM, new Page.GetByRoleOptions()
+                .setName(Pattern.compile("^" + escapeRegex(name), Pattern.CASE_INSENSITIVE))).first();
+    }
+
+    /**
+     * Escapes regex metacharacters for a pattern handed to a Playwright locator. Must never use
+     * {@link Pattern#quote} for this: Playwright serializes a compiled Pattern's source string
+     * as-is to build a JavaScript RegExp in the browser, and Java's {@code \Q...\E} quoting syntax
+     * is not valid JS regex - confirmed live, a Pattern built with {@code Pattern.quote(name)} here
+     * silently matched nothing at all, every time, regardless of input (its {@code \Q}/{@code \E}
+     * markers became literal, unmatched characters once translated to JS). Plain per-character
+     * backslash escaping, as used here, is valid in both Java and JS regex.
+     */
+    private static String escapeRegex(String text) {
+        StringBuilder escaped = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (".^$|?*+()[]{}\\".indexOf(c) >= 0) {
+                escaped.append('\\');
+            }
+            escaped.append(c);
+        }
+        return escaped.toString();
+    }
+
+    /** Clicks {@code menuButton} then the menu item named {@code itemName}; closes the menu again on any miss. */
+    private boolean clickMenuButtonAndItem(Locator menuButton, String itemName) {
+        if (menuButton.count() == 0) {
+            return false;
+        }
+        try {
+            menuButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            return false;
+        }
+        Locator item = page.getByRole(AriaRole.MENUITEM,
+                new Page.GetByRoleOptions().setName(itemName).setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(item, 3000)) {
+            closeMenu();
+            return false;
+        }
+        try {
+            item.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            return true;
+        } catch (Exception exception) {
+            closeMenu();
+            return false;
+        }
     }
 
     /** Closes an open actions-menu popover (not a modal dialog, so {@code closeOpenDialogs} won't catch it). */
@@ -260,28 +544,28 @@ public class ProjectHierarchyValidation extends BasePage {
         }
     }
 
-    /** Clicks Save changes and blocks on the save API resolving (pass or fail); screenshots on failure. */
-    private boolean saveAndVerify(Locator dialog, Locator saveButton, String kind, String rowName) {
+    /** Clicks Save changes and blocks on the create/update API resolving (pass or fail); screenshots on failure. */
+    private boolean saveAndVerify(Locator dialog, Locator saveButton, String action, String rowName) {
         String toastBefore = SoakUiUtils.readToastText(page);
         Response response = SoakUiUtils.clickAndWaitForResponse(
-                page, saveButton, this::isProjectHierarchySaveResponse, 15000);
+                page, saveButton, this::isProjectHierarchyWriteResponse, 15000);
         String toast = waitForToast(toastBefore, 6000);
 
         if (response != null) {
             int status = response.status();
             boolean pass = status >= 200 && status < 300;
-            System.out.println("[PROJECT HIERARCHY]   Save " + kind + " API: " + safeMethod(response) + " "
+            System.out.println("[PROJECT HIERARCHY]   " + action + " API: " + safeMethod(response) + " "
                     + shortPath(response.url()) + " -> " + status + " (" + (pass ? "PASS" : "FAIL") + ")"
                     + (toast.isBlank() ? "" : " | toast: \"" + toast + "\""));
             if (!pass) {
-                String shot = capture("edit-" + SoakUiUtils.slug(kind) + "-save-api-failed");
-                System.err.println("[PROJECT HIERARCHY]   Save " + kind + " FAILED for '" + rowName
+                String shot = capture(SoakUiUtils.slug(action) + "-api-failed");
+                System.err.println("[PROJECT HIERARCHY]   " + action + " FAILED for '" + rowName
                         + "' (HTTP " + status + "). Screenshot: " + (shot == null ? "<not captured>" : shot));
             }
             return pass;
         }
 
-        System.out.println("[PROJECT HIERARCHY]   Save " + kind + ": no save API response matched within 15s.");
+        System.out.println("[PROJECT HIERARCHY]   " + action + ": no API response matched within 15s.");
         boolean dialogClosed = !SoakUiUtils.isVisibleQuietly(dialog.first());
         boolean badToast = !toast.isBlank()
                 && Pattern.compile("fail|error|unable|could not", Pattern.CASE_INSENSITIVE).matcher(toast).find();
@@ -289,30 +573,31 @@ public class ProjectHierarchyValidation extends BasePage {
                 && Pattern.compile("success|saved|updated", Pattern.CASE_INSENSITIVE).matcher(toast).find();
 
         if (badToast) {
-            String shot = capture("edit-" + SoakUiUtils.slug(kind) + "-save-failed");
-            System.err.println("[PROJECT HIERARCHY]   Save " + kind + " FAILED for '" + rowName
+            String shot = capture(SoakUiUtils.slug(action) + "-failed");
+            System.err.println("[PROJECT HIERARCHY]   " + action + " FAILED for '" + rowName
                     + "' (toast: \"" + toast + "\"). Screenshot: " + (shot == null ? "<not captured>" : shot));
             return false;
         }
         if (goodToast || dialogClosed) {
-            System.out.println("[PROJECT HIERARCHY]   Save " + kind + " accepted"
+            System.out.println("[PROJECT HIERARCHY]   " + action + " accepted"
                     + (dialogClosed ? " (dialog closed)" : "") + (toast.isBlank() ? "" : " toast: \"" + toast + "\""));
             return true;
         }
 
-        String shot = capture("edit-" + SoakUiUtils.slug(kind) + "-save-unconfirmed");
-        System.err.println("[PROJECT HIERARCHY]   Save " + kind + " for '" + rowName
+        String shot = capture(SoakUiUtils.slug(action) + "-unconfirmed");
+        System.err.println("[PROJECT HIERARCHY]   " + action + " for '" + rowName
                 + "' had no confirmation (no API match, no toast, dialog still open). Screenshot: "
                 + (shot == null ? "<not captured>" : shot));
         return false;
     }
 
-    /** True for the response that backs a Project Hierarchy Save changes click. Broad on purpose. */
-    private boolean isProjectHierarchySaveResponse(Response response) {
+    /** True for the response that backs a Project Hierarchy create/update/delete action. Broad on purpose. */
+    private boolean isProjectHierarchyWriteResponse(Response response) {
         try {
             String method = response.request().method();
             String url = response.url().toLowerCase(Locale.ROOT);
-            boolean write = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+            boolean write = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)
+                    || "DELETE".equals(method);
             return write && (url.contains("node") || url.contains("site")
                     || url.contains("hierarchy") || url.contains("project"));
         } catch (Exception exception) {
@@ -325,8 +610,10 @@ public class ProjectHierarchyValidation extends BasePage {
     // ---------------------------------------------------------------------
 
     /**
-     * Opens the "Audit Logs" tab left available on whichever Node/Site row
-     * {@link #validateRandomNodeAndSite()} selected, then exercises search and export. Does not
+     * Opens the "Audit Logs" tab left available on the Project Hierarchy page after
+     * {@link #validateRandomNodeAndSite()}'s own Node/Site lifecycle has run (and, by then, deleted
+     * both rows it created) - unchanged by that method's rewrite to a Create/Update/Delete lifecycle,
+     * since this method never depended on a specific row staying selected to begin with. Does not
      * select a tree row of its own - it only depends on a tab already being present, so it never
      * touches tree/selection state.
      *
@@ -496,57 +783,6 @@ public class ProjectHierarchyValidation extends BasePage {
     }
 
     // ---------------------------------------------------------------------
-    // Tree discovery
-    // ---------------------------------------------------------------------
-
-    private List<Locator> treeItems() {
-        List<Locator> items = new ArrayList<>();
-        try {
-            Locator rows = page.getByRole(AriaRole.TREEITEM);
-            int count = rows.count();
-            for (int index = 0; index < count; index++) {
-                items.add(rows.nth(index));
-            }
-        } catch (Exception exception) {
-            System.err.println("[PROJECT HIERARCHY] Could not list tree rows: " + exception.getMessage());
-        }
-        return items;
-    }
-
-    private String rowName(Locator item) {
-        try {
-            String name = item.getAttribute("aria-label");
-            if (name != null && !name.isBlank()) {
-                return name.replaceAll("(?i)\\s*open actions menu\\s*$", "").trim();
-            }
-        } catch (Exception ignored) {
-            // Fall through.
-        }
-        try {
-            String text = item.textContent();
-            return text == null ? "<unnamed row>" : text.trim().replaceAll("\\s+", " ");
-        } catch (Exception exception) {
-            return "<unnamed row>";
-        }
-    }
-
-    /** "Rename Node" -&gt; "Node"; "Rename Site" -&gt; "Site"; "Rename Device" -&gt; "Device", etc. */
-    private String renameKind(Locator renameItem) {
-        try {
-            String text = renameItem.textContent();
-            if (text != null) {
-                String kind = text.replaceFirst("(?i)^\\s*rename\\s+", "").trim();
-                if (!kind.isBlank()) {
-                    return kind;
-                }
-            }
-        } catch (Exception ignored) {
-            // Fall through.
-        }
-        return "Item";
-    }
-
-    // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
 
@@ -585,15 +821,4 @@ public class ProjectHierarchyValidation extends BasePage {
         }
     }
 
-    private long resolveSeed() {
-        String configured = ConfigReader.getOrDefault("project.hierarchy.random.seed", "");
-        if (configured != null && !configured.isBlank()) {
-            try {
-                return Long.parseLong(configured.trim());
-            } catch (NumberFormatException ignored) {
-                // Fall through to a fresh seed.
-            }
-        }
-        return System.nanoTime();
-    }
 }

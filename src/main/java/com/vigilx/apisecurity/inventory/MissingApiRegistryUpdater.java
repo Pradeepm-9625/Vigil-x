@@ -55,12 +55,22 @@ public final class MissingApiRegistryUpdater {
                 ? (ArrayNode) root.get("apis") : root.putArray("apis");
 
         Set<String> monitorKeys = keysOf(comparison.monitorApis());
+        Set<String> currentlyMissingKeys = keysOf(comparison.missingFromMonitor());
 
-        // Remove stale entries: ApiMonitor now captures them.
+        // Remove stale entries: either ApiMonitor now captures them, or this run's own HAR no longer
+        // confirms them as missing at all (e.g. the configured HAR file was swapped/narrowed since the
+        // entry was added) - confirmed live: entries like "/views"/"/roles"/"/custom-maps" (missing
+        // their "/api/v1" prefix) survived here indefinitely because this loop only ever checked the
+        // first condition, even though the current HAR contains no "/views" or "/roles" URL at all, so
+        // they could never be re-confirmed - exactly the one invariant this registry's own _readme
+        // already promises ("Only ever contains APIs ApiComparisonService has confirmed missing from
+        // ApiMonitor's real capture"). Every such stale entry was still being merged into every
+        // consumer's final inventory (including the load-test JMX), where its bare/wrong path then
+        // failed replay with a 400.
         ArrayNode kept = MAPPER.createArrayNode();
         for (JsonNode entry : apis) {
             String key = comparisonKeyOf(entry);
-            if (monitorKeys.contains(key)) {
+            if (monitorKeys.contains(key) || !currentlyMissingKeys.contains(key)) {
                 result.removed.add(key);
             } else {
                 kept.add(entry);
