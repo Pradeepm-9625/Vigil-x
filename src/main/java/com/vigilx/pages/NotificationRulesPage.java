@@ -111,10 +111,18 @@ public class NotificationRulesPage extends BasePage {
     // Navigation + page validation
     // ---------------------------------------------------------------------
 
-    /** Clicks the "Notification Rules" link on the Application Settings Device sub-page. */
+    /**
+     * Clicks "Notification Rules" wherever it currently renders - a link on the Application
+     * Settings Device sub-page, or (confirmed live via a real recording) a tab on the Configuration
+     * page's own default view. Both entry points land on the exact same table/toggle screen, so
+     * {@link #runNotificationRulesFlow()} needs no other change to work from either one.
+     */
     public boolean open() {
         Locator link = page.getByRole(AriaRole.LINK,
-                new Page.GetByRoleOptions().setName("Notification Rules").setExact(false)).first();
+                        new Page.GetByRoleOptions().setName("Notification Rules").setExact(false))
+                .or(page.getByRole(AriaRole.TAB,
+                        new Page.GetByRoleOptions().setName("Notification Rules").setExact(false)))
+                .first();
         if (!SoakUiUtils.waitVisible(link, ELEMENT_TIMEOUT_MS)) {
             System.err.println("[NOTIFICATION RULES] 'Notification Rules' link not found.");
             return false;

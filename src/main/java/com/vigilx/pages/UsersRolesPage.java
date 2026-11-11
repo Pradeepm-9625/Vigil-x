@@ -84,8 +84,18 @@ public class UsersRolesPage extends BasePage {
     // Navigation
     // ---------------------------------------------------------------------
 
-    /** Opens Settings (only if it is not already open) then the "Users &amp; Roles" navigation link. */
+    /**
+     * Opens Settings (only if it is not already open) then the "Users &amp; Roles" navigation
+     * link - a no-op re-using the current page if {@link #isOnUsersRolesPage()} already, since
+     * this is called right after {@code ApplicationHealthPage.validateUsersAndRoles()} already
+     * navigated here (confirmed live: re-clicking the same link immediately after landing on it
+     * is a harmless but real duplicate page visit).
+     */
     public boolean navigateToUsersRoles() {
+        if (isOnUsersRolesPage()) {
+            System.out.println("[USERS & ROLES] Already on Users & Roles; reusing it.");
+            return true;
+        }
         Locator usersRolesLink = usersRolesLink();
 
         boolean settingsAlreadyOpen = SoakUiUtils.isVisibleQuietly(usersRolesLink.first())
@@ -122,6 +132,18 @@ public class UsersRolesPage extends BasePage {
         }
     }
 
+    /** True once any of the Users &amp; Roles page's own sibling tabs/heading text is visible -
+     *  never true from anywhere else in Settings, since "Roles"/"Groups" tabs are specific to
+     *  this screen. */
+    private boolean isOnUsersRolesPage() {
+        return SoakUiUtils.isVisibleQuietly(page.getByText(
+                        Pattern.compile("user management", Pattern.CASE_INSENSITIVE)).first())
+                || SoakUiUtils.isVisibleQuietly(page.getByRole(AriaRole.TAB,
+                        new Page.GetByRoleOptions().setName("Roles").setExact(true)).first())
+                || SoakUiUtils.isVisibleQuietly(page.getByRole(AriaRole.TAB,
+                        new Page.GetByRoleOptions().setName("Groups").setExact(true)).first());
+    }
+
     /** Opens the "Users" section within Users &amp; Roles (a tab; a plain "Users" text as fallback). */
     public boolean navigateToUsers() {
         Locator usersTab = page.getByRole(AriaRole.TAB,
@@ -140,6 +162,30 @@ public class UsersRolesPage extends BasePage {
             return true;
         } catch (Exception exception) {
             System.err.println("[USERS & ROLES] 'Users' section could not be opened: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+    }
+
+    /**
+     * Clicks the "User Hierarchy" tab (a sibling of "Users"/"Roles"/"Groups"/"Audit Logs") and
+     * confirms it loads. This page has no functionality to exercise - navigation and page-load
+     * validation only.
+     */
+    public boolean navigateToUserHierarchyTab() {
+        Locator tab = page.getByRole(AriaRole.TAB,
+                new Page.GetByRoleOptions().setName("User Hierarchy").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(tab, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[USERS & ROLES]   'User Hierarchy' tab not present; skipping.");
+            return true;
+        }
+        try {
+            tab.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(600);
+            System.out.println("[USERS & ROLES]   'User Hierarchy' tab opened (navigation-only check).");
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[USERS & ROLES]   'User Hierarchy' tab could not be opened: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
             return false;
         }
@@ -321,8 +367,11 @@ public class UsersRolesPage extends BasePage {
      * valid. Falls back to {@code group} itself only if the dropdown lists no options at all.
      */
     public boolean selectGroup(String group) {
-        Locator combobox = page.getByRole(AriaRole.COMBOBOX)
-                .filter(new Locator.FilterOptions().setHasText("Select Group")).first();
+        // Confirmed live (the same role mismatch already found on "Select Role"): this trigger is
+        // role=button, its accessible name the placeholder text until a value is picked - not
+        // role=combobox.
+        Locator combobox = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Select Group").setExact(true)).first();
         if (!SoakUiUtils.waitVisible(combobox, ELEMENT_TIMEOUT_MS)) {
             boolean alreadySet = SoakUiUtils.isVisibleQuietly(page.getByText(group,
                     new Page.GetByTextOptions().setExact(true)).first());
@@ -358,8 +407,8 @@ public class UsersRolesPage extends BasePage {
             return false;
         }
 
-        boolean placeholderGone = page.getByRole(AriaRole.COMBOBOX)
-                .filter(new Locator.FilterOptions().setHasText("Select Group")).count() == 0;
+        boolean placeholderGone = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Select Group").setExact(true)).count() == 0;
         System.out.println("[USERS & ROLES]   Group selected (random: '" + randomGroup + "'): "
                 + (placeholderGone ? "YES" : "NOT CONFIRMED"));
         return placeholderGone;
@@ -407,8 +456,12 @@ public class UsersRolesPage extends BasePage {
      * option position.
      */
     private boolean selectFromDropdown(String placeholder, String value, String label) {
-        Locator combobox = page.getByRole(AriaRole.COMBOBOX)
-                .filter(new Locator.FilterOptions().setHasText(placeholder)).first();
+        // Confirmed live via a fresh recording (getByRole('button', { name: 'Select Role' })): this
+        // trigger is role=button, its accessible name the placeholder text until a value is picked -
+        // not role=combobox, the same role mismatch already found and fixed on this app's other
+        // "Select ..." dropdowns (Master Configuration, Device Health).
+        Locator combobox = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName(placeholder).setExact(true)).first();
         if (!SoakUiUtils.waitVisible(combobox, ELEMENT_TIMEOUT_MS)) {
             // It may already hold the value (re-run) - accept only an exact-text match, so e.g.
             // group "Test" is never satisfied by the last name "Testing".
@@ -444,10 +497,10 @@ public class UsersRolesPage extends BasePage {
             return false;
         }
 
-        // The combobox that still shows the placeholder is gone once a value is picked - the
+        // The button that still shows the placeholder is gone once a value is picked - the
         // reliable signal, without a substring false-positive from other page text.
-        boolean placeholderGone = page.getByRole(AriaRole.COMBOBOX)
-                .filter(new Locator.FilterOptions().setHasText(placeholder)).count() == 0;
+        boolean placeholderGone = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName(placeholder).setExact(true)).count() == 0;
         boolean selected = placeholderGone;
         System.out.println("[USERS & ROLES]   " + label + " selected (matching '" + value + "'): "
                 + (selected ? "YES" : "NOT CONFIRMED"));
