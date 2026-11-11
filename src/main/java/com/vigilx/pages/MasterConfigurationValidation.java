@@ -27,7 +27,7 @@ import com.vigilx.utils.SoakUiUtils;
  * <p>Every "click Save changes and confirm it" step in this class - create, rename, remove, the two
  * tab saves - shares one implementation, {@link #clickSaveAndConfirm}: the background save API
  * first, a toast/dialog-closed fallback otherwise. Likewise {@link #saveChangesButton} and
- * {@link #selectSequentialOptions} are each written once and reused everywhere they apply, per the
+ * {@link #configureCheckRow} are each written once and reused everywhere they apply, per the
  * request to avoid duplicate master-configuration code/checks.
  *
  * <p>{@link #renameCreatedMaster()} and {@link #removeCreatedMaster()} both re-navigate to Master
@@ -360,17 +360,117 @@ public class MasterConfigurationValidation extends BasePage {
         if (lastCreatedMasterName == null) {
             return true;
         }
+        boolean streamOk = configureMainStream();
         boolean recordingOk = validateBaseRecordingToggle();
         boolean healthOk = configureHealthCheck();
         boolean videoImageOk = configureVideoImageCheck();
         boolean referenceImagesOk = captureReferenceImages();
-        return recordingOk && healthOk && videoImageOk && referenceImagesOk;
+        return streamOk && recordingOk && healthOk && videoImageOk && referenceImagesOk;
+    }
+
+    // ---------------------------------------------------------------------
+    // Streams: Main Stream (Resolution/Codec/FPS/Bitrate/Adaptive Stream)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Opens Streams, the Main Stream row's "Edit Main Stream" dialog, sets Resolution / Codec / FPS /
+     * Bitrate / Adaptive Stream - matching the recorded flow - then saves. A missing "Edit Main
+     * Stream" control is a clean skip; a found-but-unconfigurable one is a real failure.
+     */
+    private boolean configureMainStream() {
+        if (!selectMaster(lastCreatedMasterName)) {
+            return false;
+        }
+
+        Locator streamsTab = page.getByRole(AriaRole.TAB,
+                new Page.GetByRoleOptions().setName("Streams").setExact(false)).first();
+        if (SoakUiUtils.waitVisible(streamsTab, ELEMENT_TIMEOUT_MS)) {
+            try {
+                streamsTab.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                page.waitForTimeout(800);
+            } catch (Exception exception) {
+                System.err.println("[MASTER CONFIGURATION]   'Streams' tab could not be clicked: "
+                        + SoakUiUtils.firstLine(exception.getMessage()));
+                return false;
+            }
+        }
+
+        Locator editMainStream = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Edit Main Stream").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(editMainStream, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[MASTER CONFIGURATION]   'Edit Main Stream' control not present; skipping.");
+            return true;
+        }
+        try {
+            editMainStream.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[MASTER CONFIGURATION]   'Edit Main Stream' could not be clicked: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+
+        Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+        if (!SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
+            String shot = capture("edit-main-stream-dialog-not-open");
+            System.err.println("[MASTER CONFIGURATION]   'Edit Main Stream' dialog did not open. Screenshot: "
+                    + (shot == null ? "<not captured>" : shot));
+            SoakUiUtils.closeOpenDialogs(page);
+            return false;
+        }
+
+        try {
+            selectDialogDropdown(dialog, "Select Resolution", "720p (1280x720)");
+            selectDialogDropdown(dialog, "Select Codec", "H.264");
+            selectDialogDropdown(dialog, "Select FPS", "25");
+
+            Locator bitrate = dialog.getByRole(AriaRole.TEXTBOX,
+                    new Locator.GetByRoleOptions().setName("Bitrate (kbps)").setExact(false)).first();
+            if (SoakUiUtils.waitVisible(bitrate, ELEMENT_TIMEOUT_MS)) {
+                bitrate.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                bitrate.fill("4016");
+            }
+
+            Locator adaptiveStream = dialog.locator("label")
+                    .filter(new Locator.FilterOptions().setHasText("Adaptive Stream")).locator("span").first();
+            if (SoakUiUtils.isVisibleQuietly(adaptiveStream)) {
+                adaptiveStream.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            }
+        } catch (Exception exception) {
+            System.err.println("[MASTER CONFIGURATION]   Main Stream fields could not be set: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            SoakUiUtils.closeOpenDialogs(page);
+            return false;
+        }
+
+        boolean saved = clickSaveAndConfirm(dialog, saveChangesButton(dialog), "Main Stream save");
+        SoakUiUtils.closeOpenDialogs(page);
+        return saved;
     }
 
     /**
-     * Opens Recordings, the "Base" recording section, then toggles "Enable Base recording" on and
-     * off - confirming whichever popup each direction opens (see {@link #toggleAndConfirm}) - and
-     * finally visits the "Backup" sub-tab. Two toggles net back to the switch's original state.
+     * Opens a dialog-scoped dropdown by its placeholder trigger name (e.g. "Select Resolution") and
+     * picks {@code value}. A missing trigger is a clean skip (logged); any other failure propagates
+     * to the caller's own try/catch.
+     */
+    private void selectDialogDropdown(Locator dialog, String triggerName, String value) {
+        Locator trigger = dialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName(triggerName).setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(trigger, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[MASTER CONFIGURATION]   '" + triggerName + "' control not present; skipping.");
+            return;
+        }
+        trigger.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName(value).setExact(true)).first()
+                .click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+    }
+
+    /**
+     * Opens Recordings, the "Base" recording section, toggles "Enable Base recording" on (confirmed
+     * via {@link #toggleAndConfirm}), then "Enable event recording" and its own "Edit event
+     * recording" dialog ({@link #configureEventRecording}), then the "Backup" sub-tab's four
+     * switches ({@link #configureBackupSwitches}) - matching the recorded flow, a single confirmed
+     * toggle per switch rather than toggling back off (every one of them is created solely to be
+     * removed again at the end of the run, so nothing here needs to net back to its original state).
      */
     private boolean validateBaseRecordingToggle() {
         if (!selectMaster(lastCreatedMasterName)) {
@@ -411,38 +511,133 @@ public class MasterConfigurationValidation extends BasePage {
             System.out.println("[MASTER CONFIGURATION]   'Base' recording section not found; trying the switch directly.");
         }
 
-        Locator toggle = page.getByRole(AriaRole.SWITCH,
-                new Page.GetByRoleOptions().setName("Enable Base recording").setExact(false)).first();
-        boolean toggled;
-        if (!SoakUiUtils.waitVisible(toggle, ELEMENT_TIMEOUT_MS)) {
-            String shot = capture("base-recording-switch-not-found");
-            System.err.println("[MASTER CONFIGURATION]   'Enable Base recording' switch not found. Screenshot: "
-                    + (shot == null ? "<not captured>" : shot));
-            toggled = false;
-        } else {
-            boolean firstToggle = toggleAndConfirm(toggle, "first (on)");
-            boolean secondToggle = toggleAndConfirm(toggle, "second (off)");
-            toggled = firstToggle && secondToggle;
-        }
-
-        boolean backupOk = visitBackupTab();
-        return toggled && backupOk;
+        boolean baseOk = toggleNamedSwitch("Enable Base recording");
+        boolean eventRecordingOk = configureEventRecording();
+        boolean backupOk = visitBackupTab() && configureBackupSwitches();
+        return baseOk && eventRecordingOk && backupOk;
     }
 
     /**
-     * Clicks the switch once; if a confirmation dialog opens, confirms it so the toggle actually
-     * takes effect in both directions - the turn-on popup's button is expected to read "Enable" (per
-     * the request), but the turn-off popup naturally confirms with something else (seen live as
-     * "Disable"), so both - plus the other common affirmative labels - are accepted here. Silently
-     * cancelling (closing without confirming) would leave the switch stuck mid-toggle rather than
-     * cleanly on or off, which is worse than accepting either label. A popup with none of these is
-     * closed defensively, screenshotted for diagnosis, so it never blocks whatever runs next.
+     * "Enable event recording" (single toggle + confirm), then its own "Edit event recording"
+     * dialog: two Pre-/Post-event buffer dropdowns, each set to "5s", then the dialog's own plain
+     * "Save" button (not "Save changes" - confirmed by the recorded flow). The two dropdown triggers
+     * carry no accessible name of their own (icon-only, blank visible text), so they are matched by
+     * {@code first()} on that blank-text filter the same way every other dropdown trigger in this
+     * class is - re-queried fresh each time, so once the first one shows "5s" it naturally drops out
+     * of the "blank text" match and the second {@code first()} advances to the other one.
+     */
+    private boolean configureEventRecording() {
+        boolean toggled = toggleNamedSwitch("Enable event recording");
+        if (!toggled) {
+            return false;
+        }
+
+        Locator editEventRecording = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Edit event recording").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(editEventRecording, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[MASTER CONFIGURATION]   'Edit event recording' control not present; skipping its dialog.");
+            return true;
+        }
+        try {
+            editEventRecording.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+        } catch (Exception exception) {
+            System.err.println("[MASTER CONFIGURATION]   'Edit event recording' could not be clicked: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+
+        Locator dialog = page.getByRole(AriaRole.DIALOG).first();
+        if (!SoakUiUtils.waitVisible(dialog, ELEMENT_TIMEOUT_MS)) {
+            String shot = capture("edit-event-recording-dialog-not-open");
+            System.err.println("[MASTER CONFIGURATION]   'Edit event recording' dialog did not open. Screenshot: "
+                    + (shot == null ? "<not captured>" : shot));
+            SoakUiUtils.closeOpenDialogs(page);
+            return false;
+        }
+
+        // Each dropdown is attempted independently - a single field that cannot be found or set
+        // only skips that field (logged), rather than aborting the whole dialog and leaving "Save"
+        // never attempted.
+        //
+        // The blank-text filter also matches two controls that stay blank forever - the dialog's own
+        // info icon and its close ("X") button, both of which render before the two duration
+        // triggers - so first() always landed on one of those instead of a duration dropdown
+        // (confirmed live: that is exactly what was throwing here). nth(2) is the fix: those two
+        // fixed blank controls are always index 0 and 1, so index 2 is always the first still-unset
+        // duration dropdown - Pre-record Duration the first time through this loop, then Post-record
+        // Duration the second time once Pre-record no longer matches "blank" - confirmed directly by
+        // a fresh recording that uses this exact nth(2) index for both dropdowns in turn.
+        for (int index = 0; index < 2; index++) {
+            try {
+                Locator trigger = dialog.getByRole(AriaRole.BUTTON)
+                        .filter(new Locator.FilterOptions().setHasText(Pattern.compile("^\\s*$"))).nth(2);
+                if (!SoakUiUtils.waitVisible(trigger, ELEMENT_TIMEOUT_MS)) {
+                    System.out.println("[MASTER CONFIGURATION]   Event recording buffer dropdown " + index
+                            + " not present; skipping.");
+                    continue;
+                }
+                trigger.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                // A freshly opened popup renders last in the DOM (the same portal pattern this app
+                // uses elsewhere), so the last "5s" match is the open menu's own option - never the
+                // first dropdown's already-set "5s" button once a second one opens.
+                Locator option = page.getByRole(AriaRole.BUTTON,
+                        new Page.GetByRoleOptions().setName("5s").setExact(true)).last();
+                if (!SoakUiUtils.waitVisible(option, ELEMENT_TIMEOUT_MS)) {
+                    System.out.println("[MASTER CONFIGURATION]   '5s' option not present for buffer dropdown "
+                            + index + "; skipping.");
+                    continue;
+                }
+                option.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            } catch (Exception exception) {
+                String shot = capture("edit-event-recording-field-" + index + "-exception");
+                System.err.println("[MASTER CONFIGURATION]   Event recording buffer dropdown " + index
+                        + " could not be set: " + SoakUiUtils.firstLine(exception.getMessage())
+                        + ". Screenshot: " + (shot == null ? "<not captured>" : shot));
+            }
+        }
+
+        Locator save = dialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName("Save").setExact(true)).first();
+        boolean saved = clickSaveAndConfirm(dialog, save, "Edit event recording save");
+        SoakUiUtils.closeOpenDialogs(page);
+        return saved;
+    }
+
+    /** Secondary Server / NAS-SAN / Cloud / FTP switches, each a single toggle + confirm - matching
+     *  the recorded flow (one "Enable" confirm per switch). */
+    private boolean configureBackupSwitches() {
+        boolean secondaryServerOk = toggleNamedSwitch("Enable Secondary Server");
+        boolean nasSanOk = toggleNamedSwitch("Enable NAS/SAN");
+        boolean cloudOk = toggleNamedSwitch("Enable Cloud");
+        boolean ftpOk = toggleNamedSwitch("Enable FTP (Only Events)");
+        return secondaryServerOk && nasSanOk && cloudOk && ftpOk;
+    }
+
+    /** Clicks a switch by name, if present, and confirms via {@link #toggleAndConfirm}. A missing
+     *  switch is a clean skip, not a failure. */
+    private boolean toggleNamedSwitch(String switchName) {
+        Locator toggle = page.getByRole(AriaRole.SWITCH,
+                new Page.GetByRoleOptions().setName(switchName).setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(toggle, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[MASTER CONFIGURATION]   '" + switchName + "' switch not present; skipping.");
+            return true;
+        }
+        return toggleAndConfirm(toggle, switchName);
+    }
+
+    /**
+     * Clicks the switch once; if a confirmation dialog opens, confirms it - the common label is
+     * "Enable", but "Disable"/"Yes"/"Confirm"/"Ok" are also accepted so this one implementation
+     * covers every switch in this class regardless of its current state. Silently cancelling
+     * (closing without confirming) would leave the switch stuck mid-toggle, which is worse than
+     * accepting whichever label appears. A popup with none of these is closed defensively,
+     * screenshotted for diagnosis, so it never blocks whatever runs next.
      */
     private boolean toggleAndConfirm(Locator toggle, String label) {
         try {
             toggle.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
         } catch (Exception exception) {
-            System.err.println("[MASTER CONFIGURATION]   Base recording toggle (" + label + ") could not be clicked: "
+            System.err.println("[MASTER CONFIGURATION]   '" + label + "' toggle could not be clicked: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
             return false;
         }
@@ -456,24 +651,24 @@ public class MasterConfigurationValidation extends BasePage {
                 try {
                     String buttonText = SoakUiUtils.firstLine(confirmButton.innerText());
                     confirmButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-                    System.out.println("[MASTER CONFIGURATION]   Base recording toggle (" + label
-                            + "): confirmation popup -> '" + buttonText + "' clicked.");
+                    System.out.println("[MASTER CONFIGURATION]   '" + label
+                            + "': confirmation popup -> '" + buttonText + "' clicked.");
                 } catch (Exception exception) {
-                    System.err.println("[MASTER CONFIGURATION]   Could not confirm the popup for toggle (" + label
-                            + "): " + SoakUiUtils.firstLine(exception.getMessage()));
+                    System.err.println("[MASTER CONFIGURATION]   Could not confirm the popup for '" + label
+                            + "': " + SoakUiUtils.firstLine(exception.getMessage()));
                     SoakUiUtils.closeOpenDialogs(page);
                     return false;
                 }
             } else {
-                String shot = capture("base-recording-popup-unrecognized-" + SoakUiUtils.slug(label));
-                System.out.println("[MASTER CONFIGURATION]   Base recording toggle (" + label
-                        + "): a popup opened with no recognised confirm button; closing it. Screenshot: "
+                String shot = capture("toggle-popup-unrecognized-" + SoakUiUtils.slug(label));
+                System.out.println("[MASTER CONFIGURATION]   '" + label
+                        + "': a popup opened with no recognised confirm button; closing it. Screenshot: "
                         + (shot == null ? "<not captured>" : shot));
                 SoakUiUtils.closeOpenDialogs(page);
             }
             page.waitForTimeout(500);
         } else {
-            System.out.println("[MASTER CONFIGURATION]   Base recording toggle (" + label + "): no confirmation popup.");
+            System.out.println("[MASTER CONFIGURATION]   '" + label + "': no confirmation popup.");
         }
         return true;
     }
@@ -500,8 +695,8 @@ public class MasterConfigurationValidation extends BasePage {
 
     /**
      * Opens Health, the "Network" check category, its "Ping" row, sets Test Interval/Alert
-     * Level/Alert Threshold/Notification, then saves. Uses {@link #selectSequentialOptions} for the
-     * four dropdowns - the same helper {@link #configureVideoImageCheck()} uses for its own row.
+     * Level/Alert Threshold/Notification, then saves. Uses {@link #configureCheckRow} for the four
+     * dropdowns - the same helper {@link #configureVideoImageCheck()} uses for its own row.
      */
     private boolean configureHealthCheck() {
         Locator healthTab = page.getByRole(AriaRole.TAB,
@@ -519,9 +714,9 @@ public class MasterConfigurationValidation extends BasePage {
             return false;
         }
 
-        openCategoryRow("NetworkCheckTest", "Network", "Ping");
+        expandCategoryIfPresent("Network");
 
-        if (!selectSequentialOptions("Every 10 Sec", "Critical", "1X", "Yes")) {
+        if (!configureCheckRow("Ping", "Every 10 Sec", "Critical", "1X", "Yes")) {
             return false;
         }
 
@@ -532,7 +727,7 @@ public class MasterConfigurationValidation extends BasePage {
 
     /**
      * Opens Video and Image, its category, the "Black Frame Detection" row, sets its four dropdowns
-     * via the same {@link #selectSequentialOptions} helper {@link #configureHealthCheck()} uses, then
+     * via the same {@link #configureCheckRow} helper {@link #configureHealthCheck()} uses, then
      * saves.
      */
     private boolean configureVideoImageCheck() {
@@ -551,9 +746,9 @@ public class MasterConfigurationValidation extends BasePage {
             return false;
         }
 
-        openCategoryRow("Video and ImageCheckTest", "Video and Image", "Black Frame Detection");
+        expandCategoryIfPresent("Video and Image");
 
-        if (!selectSequentialOptions("Performed Twice Daily", "Critical", "90%", "Yes")) {
+        if (!configureCheckRow("Black Frame Detection", "Performed Twice Daily", "Critical", "90%", "Yes")) {
             return false;
         }
 
@@ -636,53 +831,66 @@ public class MasterConfigurationValidation extends BasePage {
     }
 
     /**
-     * Clicks a check-category header (its combined label, e.g. "NetworkCheckTest", falling back to
-     * the bare category name), then the specific check row within it (e.g. "Ping"). Best-effort:
-     * every click here is optional scaffolding for the dropdowns that follow, not itself a pass/fail
-     * signal, so a missing element just logs and moves on.
+     * Best-effort: clicks a check-category header (e.g. "Network", "Video and Image") if present, in
+     * case the row beneath it starts collapsed. Never itself a pass/fail signal - the row lookup in
+     * {@link #configureCheckRow} has its own chance to find the fields either way.
      */
-    private void openCategoryRow(String combinedLabel, String bareLabel, String rowLabel) {
-        Locator category = page.getByText(combinedLabel, new Page.GetByTextOptions().setExact(false)).first();
-        if (category.count() == 0) {
-            category = page.getByText(bareLabel, new Page.GetByTextOptions().setExact(true)).first();
-        }
+    private void expandCategoryIfPresent(String categoryLabel) {
+        Locator category = page.getByText(categoryLabel, new Page.GetByTextOptions().setExact(true)).first();
         if (SoakUiUtils.waitVisible(category, ELEMENT_TIMEOUT_MS)) {
             try {
                 category.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                 page.waitForTimeout(300);
             } catch (Exception ignored) {
-                // Best effort - the row lookup below still has its own chance to find the fields.
+                // Best effort - configureCheckRow() still has its own chance to find the row's fields.
             }
         }
+    }
 
+    /**
+     * Clicks the check row named {@code rowLabel} (e.g. "Ping", "Black Frame Detection") to focus
+     * it, then sets its four dropdown fields via {@link #selectSequentialOptions} - the page-wide
+     * "Select"-placeholder approach already proven live against this exact build. (A
+     * {@code role="row"}-scoped lookup matched in a manual recording of this same page but did not
+     * match when driven the same way here, so this class keeps the proven approach rather than that
+     * one.) Best effort: a missing row just logs and lets the dropdown lookup try anyway.
+     */
+    private boolean configureCheckRow(String rowLabel, String... values) {
         Locator row = page.getByText(rowLabel, new Page.GetByTextOptions().setExact(true)).first();
         if (SoakUiUtils.waitVisible(row, ELEMENT_TIMEOUT_MS)) {
             try {
                 row.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                 page.waitForTimeout(300);
             } catch (Exception ignored) {
-                // Best effort, as above.
+                // Best effort - the dropdown lookup below still has its own chance to find the fields.
             }
+        } else {
+            System.out.println("[MASTER CONFIGURATION]   '" + rowLabel + "' row not found by text; trying the "
+                    + "dropdowns directly.");
         }
+        return selectSequentialOptions(values);
     }
 
     /**
-     * Sets each of {@code values} into successive "Select" comboboxes, in document order. After a
-     * value is picked, that combobox no longer shows the "Select" placeholder, so the next
-     * {@code first()} match on the same filter naturally advances to the next field - exactly how
-     * the recorded flow reuses one selector for every dropdown in a row.
+     * Sets each of {@code values} into successive "Select" dropdown triggers, in document order.
+     * Confirmed live: these Test Interval/Alert Level/Alert Threshold/Notification dropdowns are
+     * {@code role="button"}, not {@code role="combobox"} - their accessible name is just whatever
+     * value is currently shown ("Select" until one is picked). After a value is picked, that button
+     * no longer shows "Select", so the next {@code first()} match on the same filter naturally
+     * advances to the next field.
      */
     private boolean selectSequentialOptions(String... values) {
         for (String value : values) {
-            Locator combobox = page.getByRole(AriaRole.COMBOBOX)
-                    .filter(new Locator.FilterOptions().setHasText("Select")).first();
-            if (!SoakUiUtils.waitVisible(combobox, ELEMENT_TIMEOUT_MS)) {
-                System.err.println("[MASTER CONFIGURATION]   No more 'Select' combobox found while setting '"
+            Locator trigger = page.getByRole(AriaRole.BUTTON,
+                            new Page.GetByRoleOptions().setName("Select").setExact(true))
+                    .first();
+            if (!SoakUiUtils.waitVisible(trigger, ELEMENT_TIMEOUT_MS)) {
+                System.err.println("[MASTER CONFIGURATION]   No more 'Select' dropdown found while setting '"
                         + value + "'.");
                 return false;
             }
             try {
-                combobox.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                trigger.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                 page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName(value).setExact(true)).first()
                         .click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
             } catch (Exception exception) {
@@ -749,23 +957,32 @@ public class MasterConfigurationValidation extends BasePage {
     }
 
     /**
-     * Opens the master's row-level "..." menu: a {@code role="combobox"} kebab toggle
-     * ({@code .master-config-template-item__menu-toggle}) nested inside the same card element as
-     * the master's name/date, confirmed live via DOM inspection. "Edit", "Remove", "Set as
-     * default", "Duplicate" and "Discover Stream Settings" only render as buttons once this menu is
-     * open - no number of clicks on the card itself ever exposes them, since they live in this
-     * popup, not on the card. Shared by {@link #renameCreatedMaster()} and
-     * {@link #removeCreatedMaster()} so neither repeats this lookup.
+     * Opens the master's row-level "..." menu: a kebab toggle
+     * ({@code .master-config-template-item__menu-toggle}) that sits alongside the card's own
+     * name/date text. "Edit", "Remove", "Set as default", "Duplicate" and "Discover Stream Settings"
+     * only render as buttons once this menu is open - no number of clicks on the card itself ever
+     * exposes them, since they live in this popup, not on the card. Shared by
+     * {@link #renameCreatedMaster()} and {@link #removeCreatedMaster()} so neither repeats this
+     * lookup.
+     *
+     * <p>{@link #masterCard} itself resolves to a {@code role="button"} element, and a browser's
+     * accessibility tree does not reliably expose an interactive element nested inside another one -
+     * confirmed live: searching only inside that card element never finds the toggle, even though it
+     * is clearly visible right next to the card's own name/date in a screenshot taken at that exact
+     * moment. The toggle is therefore looked for both inside the card (in case a future build does
+     * nest it there) and in the card's own parent container (a sibling of the card, the far more
+     * likely real layout), trying each candidate role this control is known to render as.
      */
     private boolean openCardMenu(String masterName) {
         Locator card = masterCard(masterName);
-        Locator menuToggle = card.locator(".master-config-template-item__menu-toggle").first();
-        if (menuToggle.count() == 0) {
-            // Fallback in case that class name ever changes: the toggle is still the only
-            // role=combobox nested inside the card.
-            menuToggle = card.getByRole(AriaRole.COMBOBOX).first();
+        Locator menuToggle = findMenuToggle(card);
+        if (menuToggle == null) {
+            menuToggle = findMenuToggle(card.locator("xpath=.."));
         }
-        if (!SoakUiUtils.waitVisible(menuToggle, ELEMENT_TIMEOUT_MS)) {
+        if (menuToggle == null) {
+            menuToggle = findMenuToggle(card.locator("xpath=../.."));
+        }
+        if (menuToggle == null) {
             return false;
         }
         try {
@@ -777,6 +994,33 @@ public class MasterConfigurationValidation extends BasePage {
                     + "': " + SoakUiUtils.firstLine(exception.getMessage()));
             return false;
         }
+    }
+
+    /**
+     * The kebab menu-toggle within {@code scope}, trying its known class name first, then every
+     * ARIA role this control has been confirmed to render as live (role mismatches between a build's
+     * actual markup and an assumed role have already been found more than once on this page's own
+     * Select dropdowns) - {@code null} when none of them match.
+     */
+    private Locator findMenuToggle(Locator scope) {
+        Locator toggle = scope.locator(".master-config-template-item__menu-toggle").first();
+        if (SoakUiUtils.waitVisible(toggle, 1500)) {
+            return toggle;
+        }
+        toggle = scope.getByRole(AriaRole.COMBOBOX).first();
+        if (SoakUiUtils.waitVisible(toggle, 1500)) {
+            return toggle;
+        }
+        toggle = scope.getByRole(AriaRole.BUTTON)
+                .filter(new Locator.FilterOptions().setHasText(Pattern.compile("^\\s*$"))).first();
+        if (SoakUiUtils.waitVisible(toggle, 1500)) {
+            return toggle;
+        }
+        toggle = scope.locator("[class*='menu-toggle' i], [class*='kebab' i], [aria-haspopup]").first();
+        if (SoakUiUtils.waitVisible(toggle, 1500)) {
+            return toggle;
+        }
+        return null;
     }
 
     // ---------------------------------------------------------------------

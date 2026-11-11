@@ -74,12 +74,20 @@ public class OrganizationPage extends BasePage {
 
         // Confirmed live: "h4.page-title" alone no longer matches anything on this build's
         // Organisation page (the heading text "Organization" is still there, just not on an h4 -
-        // this made isOrganizationPageLoaded() hang for its full default timeout). Kept as the
-        // first try for whatever page still renders it this way, with a role-based fallback that
-        // matches the visible "Organization" heading regardless of its tag.
+        // this made isOrganizationPageLoaded() hang for its full default timeout). The role-based
+        // heading fallback added for that case has itself since been seen live to miss too -
+        // isOrganizationPageLoaded() reporting "NO" even immediately after the page's own cosmetic
+        // check (healthPages.validateOrganisation(), a sibling, unmodified check) had just passed -
+        // so two more signals confirmed directly from a fresh recording are added: the "Edit Admin
+        // Details" and "Edit organization logo" buttons, both unique to this exact Profile view and
+        // unlikely to ever rename/restyle away at the same time as the heading.
         lblOrganizationHeader = page.locator("h4.page-title")
                 .or(page.getByRole(AriaRole.HEADING,
                         new Page.GetByRoleOptions().setName("Organization").setExact(false)))
+                .or(page.getByRole(AriaRole.BUTTON,
+                        new Page.GetByRoleOptions().setName("Edit Admin Details").setExact(false)))
+                .or(page.getByRole(AriaRole.BUTTON,
+                        new Page.GetByRoleOptions().setName("Edit organization logo").setExact(false)))
                 .first();
 
     }
@@ -277,7 +285,11 @@ public class OrganizationPage extends BasePage {
                             .setExact(false)).first());
             System.out.println("[ORGANISATION]   Address Details updated: fieldsSet=" + (line1Ok && line2Ok)
                     + " toast=" + toastOk + " line1Shown=" + line1Shown + " line2Shown=" + line2Shown);
-            return line1Ok && line2Ok && toastOk && line1Shown && line2Shown;
+            // The toast is confirmed live to be occasionally missed (timing, or a toast identical to
+            // an earlier section's already consumed by waitForToastToClear() above) even on a save
+            // that genuinely took effect - the real, direct evidence is the new address values
+            // actually showing on the page afterward, which is what gates this instead.
+            return line1Ok && line2Ok && line1Shown && line2Shown;
         } catch (Exception exception) {
             System.err.println("[ORGANISATION]   Address Details update failed: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
@@ -319,14 +331,19 @@ public class OrganizationPage extends BasePage {
             saveChanges.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
             page.waitForTimeout(600);
 
-            boolean toastOk = waitForSuccessToast(toastContext, toastBefore);
+            boolean toastSeen = waitForSuccessToast(toastContext, toastBefore);
             SoakUiUtils.closeOpenDialogs(page);
 
             boolean nameShown = !changingName
                     || SoakUiUtils.isVisibleQuietly(page.getByText(newLastName,
                             new Page.GetByTextOptions().setExact(false)).first());
+            // A plain save-without-modification is confirmed live to show no toast at all (nothing
+            // changed, nothing to confirm) - gating on one there would fail this sub-check for
+            // correct, expected behaviour. A real change still requires its success toast.
+            boolean toastOk = !changingName || toastSeen;
             System.out.println("[ORGANISATION]   " + toastContext + ": changed=" + changingName
-                    + " fieldSet=" + fieldOk + " toast=" + toastOk + " nameShown=" + nameShown);
+                    + " fieldSet=" + fieldOk + " toast=" + toastSeen + (changingName ? "" : " (not required: no change made)")
+                    + " nameShown=" + nameShown);
             return fieldOk && toastOk && nameShown;
         } catch (Exception exception) {
             System.err.println("[ORGANISATION]   " + toastContext + " failed: "

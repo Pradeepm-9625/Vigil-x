@@ -540,10 +540,19 @@ public class SequencePage extends BasePage {
     // ---------------------------------------------------------------------
 
     /**
-     * Opens "Open actions for {sequenceName}", clicks "Delete", confirms the resulting
-     * confirmation dialog (identified by its own "Are you sure" text, never a page-wide button
-     * index), clicks that confirmation dialog's OWN "Delete", and confirms both the toast and that
-     * the sequence is gone.
+     * Opens "Open actions for {sequenceName}", clicks "Delete", confirms via that same control's
+     * own confirm step, and confirms both the toast and that the sequence is gone.
+     *
+     * <p>Unlike {@link LiveViewCrudPage#deleteView} (and {@code QCPage}'s delete confirmations),
+     * Sequence's delete confirmation is NOT wrapped in a {@code role="dialog"} - confirmed via a
+     * real recording that is just two plain, unscoped {@code getByRole('button', { name: 'Delete' })}
+     * clicks with no dialog lookup in between. An earlier version of this method copied the
+     * dialog-scoped "Are you sure" lookup from {@code deleteView} without that having been
+     * independently confirmed against Sequence's own confirmation control, which is why it never
+     * found a dialog and always failed here. The confirm control renders after the trigger, so the
+     * LAST "Delete" button match is always the confirm one once it appears - the trigger itself is
+     * gone/closed by then - the same last-in-DOM convention already used for this app's other
+     * popup-style controls (see {@code MasterConfigurationValidation.configureEventRecording}).
      */
     public boolean deleteSequence(String sequenceName) {
         Locator actionsButton = openActionsFor(sequenceName);
@@ -562,20 +571,10 @@ public class SequencePage extends BasePage {
             }
             deleteButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
 
-            // Scoped to the confirmation dialog's own text - plain-string hasText (never
-            // Pattern.quote()-wrapped regex - that produces Java-only \Q...\E escaping, invalid JS
-            // regex once serialized to Playwright's browser-side engine).
-            Locator confirmDialog = page.getByRole(AriaRole.DIALOG)
-                    .filter(new Locator.FilterOptions().setHasText("Are you sure"))
-                    .first();
-            if (!SoakUiUtils.waitVisible(confirmDialog, ELEMENT_TIMEOUT_MS)) {
-                System.err.println("[SEQUENCE]   Delete confirmation dialog not found.");
-                return false;
-            }
-            Locator confirmDelete = confirmDialog.getByRole(AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Delete").setExact(true)).first();
+            Locator confirmDelete = page.getByRole(AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Delete").setExact(true)).last();
             if (!SoakUiUtils.waitVisible(confirmDelete, ELEMENT_TIMEOUT_MS)) {
-                System.err.println("[SEQUENCE]   Confirmation dialog's own 'Delete' button not found.");
+                System.err.println("[SEQUENCE]   Delete confirmation control not found.");
                 return false;
             }
 

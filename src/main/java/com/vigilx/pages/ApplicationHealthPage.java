@@ -40,22 +40,59 @@ public class ApplicationHealthPage extends BasePage {
     /**
      * When Device Creation has just onboarded a device (device.details.device.text set), its own
      * configuration page is already open - reused here as-is, with no navigation back to the
-     * Devices list and no re-selecting any row (which could land on a different device). Otherwise
-     * falls back to the original behaviour: open Devices, click the first Online row.
+     * Devices list and no re-selecting any row. Otherwise opens Devices and, when a specific device
+     * is targeted, finds that exact row BY NAME rather than waiting for an "Online" row - a freshly
+     * onboarded device sits at "QC Pending" for a while and is not necessarily Online yet. Falls back
+     * to "click the first Online row" only when no specific device is targeted.
+     *
+     * <p>Confirmed live: the caller always runs {@link #validateDevices()} (which navigates to the
+     * Devices list) immediately before this method, so the "already open" shortcut above never
+     * actually fires in practice - the fallback below is what runs every time a device was just
+     * created. Waiting for an "Online" row there used to have no explicit timeout, so it inherited
+     * the page-wide default ({@code soak.page.timeout.ms}, 120s) - when no device happened to be
+     * Online yet, that wait ran the full 120s and then crashed the whole browser session, cascading
+     * a {@code TargetClosedError} through every soak check that ran after it. Both waits below are
+     * now explicitly bounded to 15s and caught, so a failure here fails this one check fast instead
+     * of taking the rest of the run down with it.
      */
     public boolean validateDeviceTabs() {
-        boolean targetingCreatedDevice =
-                !ConfigReader.getOrDefault("device.details.device.text", "").isBlank()
-                        && page.locator(".device-config-v1-page__body").isVisible();
+        String deviceText = ConfigReader.getOrDefault("device.details.device.text", "").trim();
+        boolean targetingCreatedDevice = !deviceText.isBlank()
+                && isVisibleWithin(page.locator(".device-config-v1-page__body"), 500);
+
         if (!targetingCreatedDevice) {
             if (!validateDevices()) return false;
-            page.getByText("Online", new Page.GetByTextOptions().setExact(true)).first().click();
+            try {
+                if (!deviceText.isBlank()) {
+                    Locator named = page.getByText(deviceText, new Page.GetByTextOptions().setExact(false)).first();
+                    named.waitFor(new Locator.WaitForOptions()
+                            .setState(WaitForSelectorState.VISIBLE).setTimeout(15000));
+                    named.click();
+                } else {
+                    Locator online = page.getByText("Online", new Page.GetByTextOptions().setExact(true)).first();
+                    online.waitFor(new Locator.WaitForOptions()
+                            .setState(WaitForSelectorState.VISIBLE).setTimeout(15000));
+                    online.click();
+                }
+                waitAfterPageNavigation();
+            } catch (Exception exception) {
+                return false;
+            }
         }
         for (String tab : new String[] {"Streams", "Details", "Recordings", "VA Settings", "Health"}) {
             page.getByRole(AriaRole.TAB, new Page.GetByRoleOptions().setName(tab).setExact(true)).click();
         }
         // Deliberately does not click Add AI Models, Submit, Manual Health Check, or Run All.
         return page.locator(".device-config-v1-page__body").isVisible();
+    }
+
+    /** Non-throwing, bounded visibility check - never inherits the page-wide default timeout. */
+    private boolean isVisibleWithin(Locator locator, int timeoutMs) {
+        try {
+            return locator.isVisible(new Locator.IsVisibleOptions().setTimeout(timeoutMs));
+        } catch (Exception exception) {
+            return false;
+        }
     }
 
     /** Runs after Devices and Device Tabs: opens Alerts V1 and validates the Video Alert playback. */

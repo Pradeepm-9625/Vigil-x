@@ -98,6 +98,40 @@ public class InfraPage extends BasePage {
     }
 
     /**
+     * Clicks the "NAS/SAN" / "Cloud" / "FTP" buttons directly on the Infra Management page itself -
+     * confirmed live via a real recording, distinct from the identically-named Backup-tab toggle
+     * switches in {@link MasterConfigurationValidation#configureBackupSwitches()} and
+     * {@link DeviceDetailsValidation}'s own Backup sub-tab, neither of which this touches. Each click
+     * is best-effort and read-only here (no dialog/confirmation expected) - a missing button just
+     * logs and is not a failure.
+     */
+    public boolean exerciseInfraFilters() {
+        boolean nasSanOk = clickButtonIfPresent("NAS/SAN");
+        boolean cloudOk = clickButtonIfPresent("Cloud");
+        boolean ftpOk = clickButtonIfPresent("FTP");
+        return nasSanOk && cloudOk && ftpOk;
+    }
+
+    private boolean clickButtonIfPresent(String name) {
+        Locator button = page.getByRole(AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName(name).setExact(true)).first();
+        if (!SoakUiUtils.waitVisible(button, ELEMENT_TIMEOUT_MS)) {
+            System.out.println("[INFRA]   '" + name + "' control not present; skipping.");
+            return true;
+        }
+        try {
+            button.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            page.waitForTimeout(500);
+            System.out.println("[INFRA]   '" + name + "' clicked.");
+            return true;
+        } catch (Exception exception) {
+            System.err.println("[INFRA]   '" + name + "' could not be clicked: "
+                    + SoakUiUtils.firstLine(exception.getMessage()));
+            return false;
+        }
+    }
+
+    /**
      * The "Infra Management" navigation entry. The recording named it "Infra Management Infra"
      * (a group label + its "Infra" link concatenated); this matches any link whose accessible
      * name contains "infra", then falls back to the same as plain nav text, so it survives a

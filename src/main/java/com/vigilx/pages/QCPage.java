@@ -64,7 +64,13 @@ public class QCPage extends BasePage {
     // Navigation
     // ---------------------------------------------------------------------
 
-    /** Opens Settings (only if not already open) then "QC", and confirms the page loaded. */
+    /**
+     * Opens Settings (only if not already open) then the checklist screen - confirmed live via a
+     * real recording that this checklist feature now lives as the "Master Data" left-nav link's own
+     * landing content (no separate "QC" nav item reachable there any more), so "Master Data" is
+     * tried FIRST; the original "QC" text link is kept as a fallback in case some environment still
+     * exposes it, so neither path breaks the other.
+     */
     public boolean navigateToQC() {
         Locator addSection = addChecklistSectionButton();
         if (!SoakUiUtils.isVisibleQuietly(addSection)) {
@@ -72,15 +78,23 @@ public class QCPage extends BasePage {
                 Locator openSettings = page.getByRole(AriaRole.BUTTON,
                         new Page.GetByRoleOptions().setName("Open settings").setExact(false)).first();
                 boolean settingsAlreadyOpen = SoakUiUtils.isVisibleQuietly(page.getByText(
-                        Pattern.compile("^\\s*QC\\s*$", Pattern.CASE_INSENSITIVE)).first());
+                        Pattern.compile("^\\s*QC\\s*$", Pattern.CASE_INSENSITIVE)).first())
+                        || SoakUiUtils.isVisibleQuietly(masterDataNavLink());
                 if (!settingsAlreadyOpen && SoakUiUtils.isVisibleQuietly(openSettings)) {
                     openSettings.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                     page.waitForTimeout(500);
                 }
-                Locator qcLink = page.getByText(Pattern.compile("^\\s*QC\\s*$", Pattern.CASE_INSENSITIVE)).first();
-                if (SoakUiUtils.waitVisible(qcLink, ELEMENT_TIMEOUT_MS)) {
-                    qcLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                Locator masterDataLink = masterDataNavLink();
+                if (SoakUiUtils.waitVisible(masterDataLink, ELEMENT_TIMEOUT_MS)) {
+                    masterDataLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
                     page.waitForTimeout(800);
+                }
+                if (!SoakUiUtils.isVisibleQuietly(addSection)) {
+                    Locator qcLink = page.getByText(Pattern.compile("^\\s*QC\\s*$", Pattern.CASE_INSENSITIVE)).first();
+                    if (SoakUiUtils.waitVisible(qcLink, ELEMENT_TIMEOUT_MS)) {
+                        qcLink.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+                        page.waitForTimeout(800);
+                    }
                 }
             } catch (Exception exception) {
                 System.err.println("[QC]   Could not open QC: " + SoakUiUtils.firstLine(exception.getMessage()));
@@ -90,6 +104,13 @@ public class QCPage extends BasePage {
         boolean loaded = SoakUiUtils.waitVisible(addSection, ELEMENT_TIMEOUT_MS);
         System.out.println("[QC] QC page opened: " + (loaded ? "YES" : "NO"));
         return loaded;
+    }
+
+    /** The "Master Data" left-nav link - same match pattern as {@link MasterDataPage}'s own. */
+    private Locator masterDataNavLink() {
+        return page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions()
+                        .setName(Pattern.compile("master\\s*data", Pattern.CASE_INSENSITIVE)))
+                .first();
     }
 
     // ---------------------------------------------------------------------
