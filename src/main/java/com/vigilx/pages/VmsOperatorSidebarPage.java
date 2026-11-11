@@ -22,6 +22,23 @@ import com.vigilx.utils.SoakUiUtils;
  * clicking a button and then immediately navigating away from it via a fresh page navigation
  * forces an extra full page reload, which was bouncing the whole walk back through
  * Dashboard/Infra Management between pages instead of going straight to the next one.
+ * Infra Management -&gt; profile menu role switch ("Admin" -&gt; "VMS Operator" and back) - the
+ * mechanics only. A real recording walked the full VMS Operator sidebar under this role (Cameras
+ * / Sequence / Audit Logs / Maps / Custom Maps / Archive / Search / Exports / Audit Logs); every
+ * one of those screens except "Custom Maps" already has its own real test elsewhere in the soak
+ * run, under Admin ({@link LiveViewCrudPage} / {@link SequencePage} for Cameras/Sequence,
+ * {@code ApplicationHealthPage.validateMap}/{@code validateArchive} for Maps/Archive,
+ * {@link EventSearchValidation} for Search, {@link ArchiveExportValidation} for Exports,
+ * {@code AuditLogsPage} for both Audit Logs occurrences).
+ *
+ * <p>Running those same real tests under this role instead was tried and reverted: live
+ * validation showed Live View, Sequence, Audit Logs Search, Map, Event Search, Bookmark Search,
+ * Archive Export - Snapshots and Audit Logs - Archive Export all FAIL under VMS Operator
+ * (permission/UI differences from Admin), even though every one of them passes cleanly in its
+ * existing Admin-role position - so they stay there, untouched. Only "Custom Maps" has no
+ * functional test anywhere else in the codebase, so {@link #visitCustomMaps()} is this class's
+ * only remaining page-load check, run between {@link #switchRole} calls in
+ * {@code SoakHealthCheckRunner} right after Infra Management opens, before Application Settings.
  *
  * <p>Contract: never throws into the caller. Every failure is logged and returned as
  * {@code false} so the soak continues.

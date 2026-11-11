@@ -597,6 +597,58 @@ public final class SoakHealthCheckRunner {
             if (vmsSidebarRoleSwitchEnabled) {
                 validatePage(page, result, "Infra Management - VMS Operator Role Switch",
                         () -> switchedToVmsOperator);
+            // Infra Management -> profile menu role switch to "VMS Operator". A real recording
+            // walked the full sidebar under this role (Cameras/Sequence/Audit Logs/Maps/Custom
+            // Maps/Archive/Search/Exports/Audit Logs); every one of those screens except "Custom
+            // Maps" already has its own real test further down this method, under Admin - moving
+            // those tests to run here instead was tried and reverted: live validation showed Live
+            // View, Sequence, Audit Logs Search, Map, Event Search, Bookmark Search, Archive
+            // Export - Snapshots and Audit Logs - Archive Export all FAIL under VMS Operator
+            // (permission/UI differences from Admin) even though every one of them passes cleanly
+            // in its original Admin-role position - relocating them would have "fixed" the
+            // navigation-only complaint by breaking working tests, which the standing requirement
+            // not to affect existing working scripts rules out. So only "VMS Operator - Custom
+            // Maps" (the one screen with no functional test anywhere else) runs under this role;
+            // the original role is restored immediately after, before Application Settings and
+            // everything else resumes under Admin.
+            VmsOperatorSidebarPage vmsOperatorSidebar = new VmsOperatorSidebarPage(page);
+            boolean vmsSidebarRoleSwitchEnabled = Boolean.parseBoolean(
+                    ConfigReader.getOrDefault("soak.enable.vms.operator.sidebar", "true"));
+            String roleBeforeVmsOperator = vmsSidebarRoleSwitchEnabled ? vmsOperatorSidebar.currentRoleLabel() : null;
+            boolean switchedToVmsOperator = !vmsSidebarRoleSwitchEnabled
+                    || vmsOperatorSidebar.switchRole("VMS Operator");
+            if (vmsSidebarRoleSwitchEnabled) {
+                validatePage(page, result, "Infra Management - VMS Operator Role Switch",
+                        () -> switchedToVmsOperator);
+            }
+
+            validatePage(page, result, "VMS Operator - Custom Maps", vmsOperatorSidebar::visitCustomMaps);
+
+            if (vmsSidebarRoleSwitchEnabled) {
+                boolean restoredRoleAfterVmsOperator = roleBeforeVmsOperator == null
+                        || vmsOperatorSidebar.switchRole(roleBeforeVmsOperator);
+                validatePage(page, result, "Infra Management - VMS Operator Role Restore",
+                        () -> restoredRoleAfterVmsOperator);
+            }
+
+            if (config.applicationSettingsEnabled()) {
+                InfraPage infra = new InfraPage(page);
+                if (infra.open()) {
+                    ApplicationSettingsPage applicationSettings = infra.openApplicationSettings();
+                    if (applicationSettings.openDevice()) {
+                        validatePage(page, result, "Application Settings - Enable QC",
+                                applicationSettings::validateEnableQc);
+                        validatePage(page, result, "Application Settings - Enable VA Alerts",
+                                applicationSettings::validateEnableVaAlerts);
+                        // Device -> Notification Rules: random toggle OFF/ON checks.
+                        if (Boolean.parseBoolean(
+                                ConfigReader.getOrDefault("soak.enable.notification.rules", "true"))) {
+                            NotificationRulesPage notificationRules = new NotificationRulesPage(page);
+                            validatePage(page, result, "Application Settings - Notification Rules",
+                                    notificationRules::runNotificationRulesFlow);
+                        }
+                    }
+                }
             }
 
             // --- Cameras: Live View (stream available) -> condition-bound 10s continuous stream
@@ -785,6 +837,10 @@ public final class SoakHealthCheckRunner {
             // Full VMS Operator sidebar walk complete - straight to Logout, matching the recorded
             // flow exactly (no role restore, no Application Settings here: that already ran
             // earlier, under Admin, before the role switch above - see there for why).
+
+            // Archive/Event Search/Bookmark Search/Archive Export are the last validations; logout
+            // follows immediately. Settings, Users & Roles and Organisation already ran once above, so they
+            // are not repeated here.
             if (config.logoutEnabled()) {
                 LOG.info("[SOAK] Logout started");
                 if (dashboard.logoutSafely(appUrl)) {
