@@ -239,22 +239,28 @@ public class SequencePage extends BasePage {
     }
 
     /**
-     * Selects two distinct online cameras at random. {@code cameraPaths} (a configured, hard-coded
-     * project/site/node path) is deliberately no longer used to drive tree expansion - confirmed
-     * live that this real tree's structure had drifted from that static config (an unrelated,
-     * pre-existing JMeter run had renamed a node), which made the hard-coded walk find nothing.
-     * Expansion is now the same generic, stable-attribute walk ({@code aria-expanded="false"} under
-     * {@code #mui-tree-view-...}) already proven in {@link LiveViewCrudPage#expandDeviceTree()} and
-     * {@link ArchiveValidation} - never a fixed path, so it cannot go stale the same way again. The
-     * parameter is kept only for call-site/signature compatibility.
+     * Selects two distinct cameras at random, online or offline. {@code cameraPaths} (a configured,
+     * hard-coded project/site/node path) is deliberately no longer used to drive tree expansion -
+     * confirmed live that this real tree's structure had drifted from that static config (an
+     * unrelated, pre-existing JMeter run had renamed a node), which made the hard-coded walk find
+     * nothing. Expansion is now the same generic, stable-attribute walk ({@code
+     * aria-expanded="false"} under {@code #mui-tree-view-...}) already proven in
+     * {@link LiveViewCrudPage#expandDeviceTree()} and {@link ArchiveValidation} - never a fixed
+     * path, so it cannot go stale the same way again. The parameter is kept only for
+     * call-site/signature compatibility.
+     * <p>
+     * Not restricted to "device is online" rows: a real recorded flow confirmed this app accepts
+     * offline cameras into a sequence just as well (create/edit/delete all succeeded with only
+     * offline cameras selected), so gating on online-only here would fail runs in environments
+     * where the available devices happen to be offline for no reason related to this feature.
      */
     private boolean selectTwoRandomCameras(String[][] cameraPaths) {
         try {
             expandDeviceTree();
 
-            Pattern onlineDevice = Pattern.compile("device is online", Pattern.CASE_INSENSITIVE);
+            Pattern anyDevice = Pattern.compile("device is (online|offline)", Pattern.CASE_INSENSITIVE);
             Locator deviceItems = page.getByRole(AriaRole.TREEITEM,
-                    new Page.GetByRoleOptions().setName(onlineDevice));
+                    new Page.GetByRoleOptions().setName(anyDevice));
             List<Locator> available = new ArrayList<>();
             for (int index = 0; index < deviceItems.count(); index++) {
                 Locator device = deviceItems.nth(index);
@@ -264,7 +270,7 @@ public class SequencePage extends BasePage {
                 }
             }
             if (available.size() < 2) {
-                System.err.println("[SEQUENCE]   Fewer than 2 online cameras were available.");
+                System.err.println("[SEQUENCE]   Fewer than 2 cameras were available.");
                 return false;
             }
 
@@ -286,15 +292,23 @@ public class SequencePage extends BasePage {
     /**
      * Reveals nested camera rows by expanding collapsed tree nodes - a generic, stable-attribute
      * walk ({@code aria-expanded="false"}), never a hard-coded project/site path - until at least
-     * one online device row is visible. Same proven pattern as
+     * one device row (online or offline) is visible. Same proven pattern as
      * {@code LiveViewCrudPage.expandDeviceTree()}; kept as this class's own copy per the existing
-     * per-class convention. Bounded so a genuinely empty/offline-only tree does not loop forever.
+     * per-class convention. Bounded so a genuinely empty tree does not loop forever.
+     * <p>
+     * Also clicks {@code .ph-v1-dynamic-tree-node__expand-circle} - confirmed live from a real
+     * recording (and from a real soak run: this method's {@code aria-expanded} walk alone found zero
+     * expanders here and left the tree fully collapsed, so {@code selectTwoRandomCameras} always
+     * failed with "Fewer than 2 cameras were available" even after it was widened to accept offline
+     * devices) that this screen's own root-level node uses this custom expand control instead of (or
+     * in addition to) an {@code aria-expanded} attribute.
      */
     private void expandDeviceTree() {
-        Pattern onlineDevice = Pattern.compile("device is online", Pattern.CASE_INSENSITIVE);
-        Locator deviceItems = page.getByRole(AriaRole.TREEITEM, new Page.GetByRoleOptions().setName(onlineDevice));
+        Pattern anyDevice = Pattern.compile("device is (online|offline)", Pattern.CASE_INSENSITIVE);
+        Locator deviceItems = page.getByRole(AriaRole.TREEITEM, new Page.GetByRoleOptions().setName(anyDevice));
         for (int attempt = 0; attempt < 5 && deviceItems.count() == 0; attempt++) {
-            Locator expanders = page.locator("[id*='mui-tree-view'] [aria-expanded='false']");
+            Locator expanders = page.locator(
+                    "[id*='mui-tree-view'] [aria-expanded='false'], .ph-v1-dynamic-tree-node__expand-circle");
             int count = expanders.count();
             if (count == 0) {
                 break;

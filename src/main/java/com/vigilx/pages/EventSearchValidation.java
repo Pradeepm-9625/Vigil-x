@@ -143,8 +143,12 @@ public class EventSearchValidation extends BasePage {
      * boundary regardless of where in the month "today" falls.
      */
     private boolean openDateRangeAndApply() {
-        Locator selectButtons = page.getByRole(AriaRole.BUTTON,
-                new Page.GetByRoleOptions().setName("Select").setExact(false));
+        // Matches either the initial "Select" placeholder or an already-applied date/time value -
+        // confirmed live (a fresh recording): this control keeps whatever range Event Search just
+        // applied when Bookmark Search reopens the SAME control right after, so its accessible name
+        // is the live timestamp (e.g. "12:00 AM 25/10/2026 08:49 PM") on that second call, not "Select".
+        Locator selectButtons = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName(
+                Pattern.compile("Select|\\d{1,2}:\\d{2}\\s*(AM|PM)", Pattern.CASE_INSENSITIVE)));
         if (selectButtons.count() == 0) {
             System.err.println("[EVENT SEARCH]   'Date & Time From' Select control not found.");
             return false;
@@ -226,8 +230,8 @@ public class EventSearchValidation extends BasePage {
      * of its timestamp - something no unrelated page label (filter names, hierarchy items, colors)
      * ever does - so that is used to find a genuine row dynamically, on both the Events and
      * Bookmarks tabs, without depending on either tab's own card markup. Confirmed live: clicking a
-     * Bookmarks row's card DIV directly (its "surveillance-card-comp" wrapper) navigates away to
-     * Playback instead of selecting/previewing it - the label is what both tabs actually expect.
+     * Bookmarks row's card DIV directly (its "vxcard" wrapper) navigates away to Playback instead of
+     * selecting/previewing it - the label is what both tabs actually expect.
      */
     private boolean selectFirstResult() {
         Locator timestampedLabel = page.locator("label")
@@ -287,7 +291,11 @@ public class EventSearchValidation extends BasePage {
      * flow's own logic).
      */
     private boolean confirmResultVideo() {
-        Locator video = page.locator(".surveillance-card-comp .s-c-b-video-wrapper .s-c-media-stack video")
+        // Outer card wrapper class renamed from "surveillance-card-comp" to "vxcard" - confirmed
+        // live via a fresh recording (".vxcard > .vxcard__body > .s-c-body > .s-c-b-video-wrapper >
+        // .s-c-media-stack > ..."); the inner ".s-c-b-video-wrapper"/".s-c-media-stack" classes are
+        // unchanged.
+        Locator video = page.locator(".vxcard .s-c-b-video-wrapper .s-c-media-stack video")
                 .last();
         if (!SoakUiUtils.isVisibleQuietly(video)) {
             video = page.locator("video").last();

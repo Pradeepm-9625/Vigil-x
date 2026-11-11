@@ -590,6 +590,15 @@ public class MapValidation extends BasePage {
             // Fall through to the keyboard fallback.
         }
 
+        // Escape is only meaningful when a preview is actually open - this runs in a finally block
+        // after every camera attempt, including ones whose preview never opened at all (an earlier
+        // return above this call). Pressing it unconditionally in that case has nothing of this
+        // page's own to close, so it can fall through to the app's own global shortcut and navigate
+        // away to the Dashboard instead - confirmed live - which the next page's navigation then has
+        // to silently undo. Only press it when a video/dialog is actually present to close.
+        if (page.locator("video").count() == 0 && page.getByRole(AriaRole.DIALOG).count() == 0) {
+            return;
+        }
         try {
             page.keyboard().press("Escape");
             page.waitForTimeout(500);

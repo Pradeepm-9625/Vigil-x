@@ -419,7 +419,10 @@ public class UsersRolesPage extends BasePage {
      * dropdown's own {@code role=listbox} popup (confirmed live, same portal pattern as
      * {@link LiveViewCrudPage}'s option lists) rather than a page-wide button/option scan, which
      * could otherwise land on an unrelated page control (e.g. a dialog action button) and click
-     * that instead of a real group option.
+     * that instead of a real group option. "None" (the no-group placeholder option this dropdown
+     * always lists first) is excluded from the random pool - it is a real option here, not a
+     * missing one, but picking it would leave the user with no group, defeating the point of this
+     * random pick - and is only ever returned when it is the sole item available.
      */
     private Locator randomVisibleOption() {
         Locator listbox = page.getByRole(AriaRole.LISTBOX).first();
@@ -444,9 +447,40 @@ public class UsersRolesPage extends BasePage {
             }
         }
         if (visible.isEmpty()) {
+            // Confirmed live: this dropdown (and "Select Group" specifically) renders with no
+            // listbox/option/menuitem role at all - a plain portal
+            // <div class="vxdd__menu vxdd__menu--portal"> of <button class="vxdd__item"> items -
+            // so the role-based scan above always finds nothing for it. Scoped to that specific,
+            // confirmed container/class rather than a bare page-wide BUTTON role, for the same
+            // "could land on an unrelated control" reason given above.
+            Locator customItems = page.locator(".vxdd__menu .vxdd__item");
+            int customCount = Math.min(customItems.count(), 40);
+            for (int index = 0; index < customCount; index++) {
+                Locator item = customItems.nth(index);
+                try {
+                    if (item.isVisible() && !item.innerText().isBlank()) {
+                        visible.add(item);
+                    }
+                } catch (Exception ignored) {
+                    // skip
+                }
+            }
+        }
+        if (visible.isEmpty()) {
             return null;
         }
-        return visible.get(new java.util.Random().nextInt(visible.size()));
+        java.util.List<Locator> withoutNone = new java.util.ArrayList<>();
+        for (Locator item : visible) {
+            try {
+                if (!"none".equalsIgnoreCase(item.innerText().trim())) {
+                    withoutNone.add(item);
+                }
+            } catch (Exception ignored) {
+                // Unreadable text - leave it out of either pool rather than risk clicking it blind.
+            }
+        }
+        java.util.List<Locator> pool = withoutNone.isEmpty() ? visible : withoutNone;
+        return pool.get(new java.util.Random().nextInt(pool.size()));
     }
 
     /**

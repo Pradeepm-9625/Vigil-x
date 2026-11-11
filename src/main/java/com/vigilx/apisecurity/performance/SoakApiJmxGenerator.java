@@ -104,9 +104,14 @@ public final class SoakApiJmxGenerator {
             // starts empty and is filled by the login sampler's own JSON Extractor on replay.
             // ${loginEmail}/${loginPassword} come from the same username/password config keys
             // ApiAuthClient already uses - the captured login body's password was masked on capture.
+            // ${devicePassword} is the real test camera's own ONVIF credential (confirmed live: the
+            // same host/username this config key already drives for UI-based device creation) -
+            // every OTHER captured sampler whose body carries a masked password (e.g. the camera
+            // capabilities probe) needs this, never the literal "********" capture masked it to.
             String jmx = LoadTestPlanBuilder.buildOrdered(planName, defaultDomain, defaultPort, "",
                     definitions, extraHeaders, schemes,
                     ConfigReader.getOrDefault("username", ""), ConfigReader.getOrDefault("password", ""),
+                    ConfigReader.getOrDefault("device.creation.password", ""),
                     LoadProfile.fromConfig());
 
             Path jmxDirectory = soakRunDirectory.resolve("jmx");
@@ -140,6 +145,31 @@ public final class SoakApiJmxGenerator {
         }
         if (request.path == null || !request.path.startsWith("/")) {
             return "captured URL has no absolute path";
+        }
+        // Engine.io long-polling handshake: every poll after the first carries a session id (sid)
+        // issued by THAT handshake, which no longer exists on replay - confirmed live, a captured
+        // sid always comes back 400 "Session ID unknown". Replaying it meaningfully would require
+        // implementing the real engine.io handshake/session protocol, not a literal HTTP capture.
+        if (request.path.contains("/socket.io/")) {
+            return "Engine.io polling handshake - its session id (sid) only exists for the original "
+                    + "capture's own connection and can never be replayed as a literal request";
+        }
+        // WebRTC WHEP SDP offer/answer negotiation (MediaMTX): the captured offer is tied to the
+        // original browser's own ICE/DTLS session and ends in 400 on replay - real WebRTC negotiation
+        // cannot be replayed from a static captured body, only performed live by a real peer.
+        if (request.path.endsWith("/whep")) {
+            return "WebRTC WHEP SDP negotiation - the captured offer is tied to the original "
+                    + "browser's own ICE session and cannot be replayed as a literal request";
+        }
+        // Presigned alert-media thumbnail link: its final path segment is a signed, base64url token
+        // carrying its own short-lived expiry claim (confirmed live by decoding one: {"s":"va",
+        // "r":"alerts-media/images/...","e":<unix-seconds>}, "e" already in the past by the time the
+        // JMX is actually run in JMeter, even same-day) - a 403 on replay is the server correctly
+        // rejecting an expired signature, not a defect this request could ever avoid by being
+        // replayed literally. Same non-replayable-capture-artifact class as the two checks above.
+        if (request.path.contains("/alert-media/")) {
+            return "Presigned alert-media link - its token carries its own short-lived expiry, "
+                    + "already past by replay time, and can never be replayed as a literal request";
         }
         return null;
     }

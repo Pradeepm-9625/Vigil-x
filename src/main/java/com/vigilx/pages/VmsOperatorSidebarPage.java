@@ -9,6 +9,19 @@ import com.microsoft.playwright.options.AriaRole;
 import com.vigilx.utils.SoakUiUtils;
 
 /**
+ * Infra Management -&gt; profile menu role switch ("Admin" -&gt; "VMS Operator" and back), plus
+ * {@link #visitCustomMaps()} - the one VMS Operator sidebar screen with no self-navigating real
+ * test of its own elsewhere in the soak run. Every OTHER sidebar entry (Cameras, Sequence, Audit
+ * Logs, Maps, Archive, Search, Exports) is reached directly by its own real test instead
+ * ({@link LiveViewCrudPage} / {@link SequencePage} for Cameras/Sequence,
+ * {@code ApplicationHealthPage.validateMap}/{@code validateArchive} for Maps/Archive,
+ * {@link EventSearchValidation} for Search, {@link ArchiveExportValidation} for Exports,
+ * {@code AuditLogsPage} for both Audit Logs occurrences) - each of those already calls its own
+ * {@code page.navigate()}/{@code navigateTo()} (or, for Search/Exports, clicks its own tab) to
+ * get there, so a separate sidebar click immediately beforehand was a real, confirmed-live bug:
+ * clicking a button and then immediately navigating away from it via a fresh page navigation
+ * forces an extra full page reload, which was bouncing the whole walk back through
+ * Dashboard/Infra Management between pages instead of going straight to the next one.
  * Infra Management -&gt; profile menu role switch ("Admin" -&gt; "VMS Operator" and back) - the
  * mechanics only. A real recording walked the full VMS Operator sidebar under this role (Cameras
  * / Sequence / Audit Logs / Maps / Custom Maps / Archive / Search / Exports / Audit Logs); every

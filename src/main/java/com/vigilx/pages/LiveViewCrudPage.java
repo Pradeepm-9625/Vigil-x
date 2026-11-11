@@ -880,7 +880,7 @@ public class LiveViewCrudPage extends BasePage {
             nameField.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
             nameField.fill(bookmarkName);
 
-            boolean typeOk = selectHumanDetectionType(dialog);
+            boolean typeOk = selectRandomEventType(dialog);
 
             Locator noteField = dialog.getByRole(AriaRole.TEXTBOX,
                     new Locator.GetByRoleOptions().setName("Type note").setExact(false)).first();
@@ -902,18 +902,21 @@ public class LiveViewCrudPage extends BasePage {
 
             waitForToastToClear();
             String toastBefore = SoakUiUtils.readToastText(page);
-            addBookmark.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            // The dialog closing is NOT reliable evidence the bookmark was actually created - a
+            // rejected submission (e.g. the event-type selection above did not really register) can
+            // still close this dialog, which is exactly how this silently "passed" while Archive ->
+            // Search -> Bookmarks showed nothing (confirmed live from a real soak run's own
+            // screenshots). Matches the same real-API-response gate every other write in this class
+            // (renameView/deleteView/saveConfiguration) already uses - never the dialog state alone.
+            Response response = SoakUiUtils.clickAndWaitForResponse(page, addBookmark,
+                    this::isBookmarkWriteResponse, 20000);
 
-            // Toast is logged as supporting evidence only, matching every other write in this class
-            // (renameView/deleteView/saveConfiguration/saveView all gate on the structural signal,
-            // never the toast) - confirmed live it can be missed within the timeout under a
-            // degraded/no-media camera stream even though the dialog still closes cleanly, which is
-            // the real, reliable signal that the submission succeeded.
+            boolean apiOk = logApiOutcome("Create Bookmark", response);
             boolean toastOk = waitForSuccessToast("Create Bookmark", toastBefore);
             boolean dialogClosed = waitForCondition(() -> !SoakUiUtils.isAnyDialogOpen(page), ELEMENT_TIMEOUT_MS);
             System.out.println("[LIVE VIEW CRUD]   createBookmarkOnCurrentCamera('" + bookmarkName + "'): typeOk="
-                    + typeOk + " toast(best-effort)=" + toastOk + " dialogClosed=" + dialogClosed);
-            return typeOk && dialogClosed;
+                    + typeOk + " api=" + apiOk + " toast(best-effort)=" + toastOk + " dialogClosed=" + dialogClosed);
+            return typeOk && apiOk && dialogClosed;
         } catch (Exception exception) {
             System.err.println("[LIVE VIEW CRUD]   createBookmarkOnCurrentCamera failed: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
@@ -930,7 +933,7 @@ public class LiveViewCrudPage extends BasePage {
      * per-tile-button-requires-.first(), same dialog-scoped "Name"/"Type note" fields and Save
      * button, same portaled type dropdown) - only the labels differ ("Snapshot"/"Snapshot
      * Name"/"Save" vs "Bookmark"/"Bookmark Name"/"Add Bookmark") - so this reuses
-     * {@link #selectHumanDetectionType(Locator)} as-is rather than a second copy, and follows the
+     * {@link #selectRandomEventType(Locator)} as-is rather than a second copy, and follows the
      * identical structural-signal-over-toast gating {@link #createBookmarkOnCurrentCamera(String)}
      * already uses (see its own note - matches every other write in this class).
      *
@@ -965,7 +968,7 @@ public class LiveViewCrudPage extends BasePage {
             nameField.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
             nameField.fill(snapshotName);
 
-            boolean typeOk = selectHumanDetectionType(dialog);
+            boolean typeOk = selectRandomEventType(dialog);
 
             Locator noteField = dialog.getByRole(AriaRole.TEXTBOX,
                     new Locator.GetByRoleOptions().setName("Type note").setExact(false)).first();
@@ -987,15 +990,19 @@ public class LiveViewCrudPage extends BasePage {
 
             waitForToastToClear();
             String toastBefore = SoakUiUtils.readToastText(page);
-            saveButton.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            // See the identical note in createBookmarkOnCurrentCamera(): the dialog closing alone is
+            // not reliable evidence of a real create - a rejected submission can still close it,
+            // which is exactly how this silently "passed" while Archive -> Exports -> Snapshots
+            // showed no new entry (confirmed live from a real soak run's own screenshots).
+            Response response = SoakUiUtils.clickAndWaitForResponse(page, saveButton,
+                    this::isSnapshotWriteResponse, 20000);
 
-            // Toast is logged as supporting evidence only - see the identical note in
-            // createBookmarkOnCurrentCamera() for why dialog-closing is the real gate here.
+            boolean apiOk = logApiOutcome("Create Snapshot", response);
             boolean toastOk = waitForSuccessToast("Create Snapshot", toastBefore);
             boolean dialogClosed = waitForCondition(() -> !SoakUiUtils.isAnyDialogOpen(page), ELEMENT_TIMEOUT_MS);
             System.out.println("[LIVE VIEW CRUD]   createSnapshotOnCurrentCamera('" + snapshotName + "'): typeOk="
-                    + typeOk + " toast(best-effort)=" + toastOk + " dialogClosed=" + dialogClosed);
-            return typeOk && dialogClosed;
+                    + typeOk + " api=" + apiOk + " toast(best-effort)=" + toastOk + " dialogClosed=" + dialogClosed);
+            return typeOk && apiOk && dialogClosed;
         } catch (Exception exception) {
             System.err.println("[LIVE VIEW CRUD]   createSnapshotOnCurrentCamera failed: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
@@ -1005,42 +1012,89 @@ public class LiveViewCrudPage extends BasePage {
     }
 
     /**
-     * Opens the "Add Bookmark" dialog's own type {@code combobox} and picks "Human Detection".
-     * Confirmed live: the option list is a {@code role=listbox} rendered in a page-level portal, not
-     * inside the dialog's own DOM subtree, so it is scoped to the listbox itself rather than the
-     * dialog (which would never find it) or an unscoped page-wide lookup. Verifies the combobox's
-     * own text actually updated to "Human Detection" afterward - not just that the option was
-     * clicked.
+     * Opens the "Add Bookmark"/"Snapshot" dialog's own type trigger and picks one of whatever
+     * event types it currently lists, at random - same "never a fixed value" convention as
+     * {@code UsersRolesPage.selectGroup(String)} - never a hard-coded "Human Detection", since
+     * that value does not need to be a specific one for this flow to be valid. "None" (the
+     * no-event-type placeholder this dropdown always lists first, pre-selected) is excluded from
+     * the random pool for the same reason {@code UsersRolesPage} excludes it: a real option here,
+     * not a missing one, but picking it would leave the association unset - only ever returned
+     * when it is the sole item available.
+     *
+     * <p>Confirmed live via a fresh recording and a live probe: this trigger is role=button
+     * (accessible name "Select Event" until a value is picked), not role=combobox - the same role
+     * mismatch already found and fixed on this app's other "Select ..." dropdowns (Users & Roles
+     * Group/Role). The option list itself is also not a {@code role=listbox}/{@code option}/
+     * {@code menuitem} at all - confirmed live to be the exact same portal pattern as "Select
+     * Group": a plain {@code <div class="vxdd__menu vxdd__menu--portal">} of
+     * {@code <button class="vxdd__item">} items (None/Human Detection/Animal Detection/Object
+     * Detection). Both of these meant this method unconditionally returned {@code false} before,
+     * so both {@link #createBookmarkOnCurrentCamera(String)} and
+     * {@link #createSnapshotOnCurrentCamera(String)} always failed regardless of whether the rest
+     * of the dialog actually submitted successfully. Verifies the trigger's own text actually
+     * updated to the chosen type afterward - not just that the option was clicked.
      */
-    private boolean selectHumanDetectionType(Locator dialog) {
-        Locator combobox = dialog.getByRole(AriaRole.COMBOBOX).first();
-        if (!SoakUiUtils.waitVisible(combobox, ELEMENT_TIMEOUT_MS)) {
-            System.err.println("[LIVE VIEW CRUD]   Bookmark type combobox not found.");
+    private boolean selectRandomEventType(Locator dialog) {
+        Locator trigger = dialog.getByRole(AriaRole.BUTTON,
+                new Locator.GetByRoleOptions().setName("Select Event").setExact(false)).first();
+        if (!SoakUiUtils.waitVisible(trigger, ELEMENT_TIMEOUT_MS)) {
+            System.err.println("[LIVE VIEW CRUD]   Event type trigger ('Select Event') not found.");
             return false;
         }
         try {
-            combobox.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
-            Locator listbox = page.getByRole(AriaRole.LISTBOX).first();
-            if (!SoakUiUtils.waitVisible(listbox, ELEMENT_TIMEOUT_MS)) {
-                System.err.println("[LIVE VIEW CRUD]   Bookmark type dropdown list did not open.");
+            trigger.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            Locator menu = page.locator(".vxdd__menu").first();
+            if (!SoakUiUtils.waitVisible(menu, ELEMENT_TIMEOUT_MS)) {
+                System.err.println("[LIVE VIEW CRUD]   Event type dropdown did not open.");
                 return false;
             }
-            Locator humanDetection = listbox.getByRole(AriaRole.BUTTON,
-                    new Locator.GetByRoleOptions().setName("Human Detection").setExact(true)).first();
-            if (!SoakUiUtils.waitVisible(humanDetection, ELEMENT_TIMEOUT_MS)) {
-                System.err.println("[LIVE VIEW CRUD]   'Human Detection' option not found.");
+            Locator items = menu.locator(".vxdd__item");
+            int count = items.count();
+            java.util.List<Locator> withoutNone = new java.util.ArrayList<>();
+            for (int index = 0; index < count; index++) {
+                Locator item = items.nth(index);
+                try {
+                    if (item.isVisible()) {
+                        String text = item.innerText().trim();
+                        if (!text.isBlank() && !"none".equalsIgnoreCase(text)) {
+                            withoutNone.add(item);
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Unreadable text - leave it out rather than risk clicking it blind.
+                }
+            }
+            if (withoutNone.isEmpty()) {
+                System.err.println("[LIVE VIEW CRUD]   Event type dropdown listed no option besides 'None'.");
                 return false;
             }
-            humanDetection.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
+            Locator chosen = withoutNone.get(new java.util.Random().nextInt(withoutNone.size()));
+            String eventTypeName = chosen.innerText().trim();
+            chosen.click(new Locator.ClickOptions().setTimeout(ELEMENT_TIMEOUT_MS));
 
+            // Re-confirmed live via SnapshotDialogProbe against the real app: a single click DOES
+            // close this portaled dropdown (menu.isVisible() -> false immediately after) and DOES
+            // rewrite the trigger's own label from "Select Event" to the chosen type - the earlier
+            // "stays open / never rewrites the label" finding above did not reproduce. The real "did
+            // this register" signal is that relabelled trigger text, read via the dialog-scoped
+            // ".vxdd__value" span - never the clicked menu item's own class (that portal is already
+            // detached by the time this runs) and never a re-query by the old "Select Event"
+            // accessible name (the button no longer matches it once relabelled). This was the actual
+            // cause of createBookmarkOnCurrentCamera/createSnapshotOnCurrentCamera always failing:
+            // typeOk never went true, regardless of whether the selection truly registered.
+            Locator valueLabel = dialog.locator(".vxdd__value").first();
             boolean selected = waitForCondition(() -> {
-                String text = combobox.textContent();
-                return text != null && text.contains("Human Detection");
+                try {
+                    String text = valueLabel.textContent();
+                    return text != null && text.trim().equalsIgnoreCase(eventTypeName);
+                } catch (Exception exception) {
+                    return false;
+                }
             }, 3000);
-            System.out.println("[LIVE VIEW CRUD]   Bookmark type 'Human Detection' selected: " + selected);
+            System.out.println("[LIVE VIEW CRUD]   Event type '" + eventTypeName + "' selected (random): " + selected);
             return selected;
         } catch (Exception exception) {
-            System.err.println("[LIVE VIEW CRUD]   selectHumanDetectionType failed: "
+            System.err.println("[LIVE VIEW CRUD]   selectRandomEventType failed: "
                     + SoakUiUtils.firstLine(exception.getMessage()));
             return false;
         }
@@ -1162,6 +1216,28 @@ public class LiveViewCrudPage extends BasePage {
             String method = response.request().method();
             String url = response.url().toLowerCase(Locale.ROOT);
             return method.equals("DELETE") && (url.contains("view") || url.contains("live"));
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    private boolean isBookmarkWriteResponse(Response response) {
+        try {
+            String method = response.request().method();
+            String url = response.url().toLowerCase(Locale.ROOT);
+            return (method.equals("POST") || method.equals("PUT") || method.equals("PATCH"))
+                    && url.contains("bookmark");
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    private boolean isSnapshotWriteResponse(Response response) {
+        try {
+            String method = response.request().method();
+            String url = response.url().toLowerCase(Locale.ROOT);
+            return (method.equals("POST") || method.equals("PUT") || method.equals("PATCH"))
+                    && url.contains("snapshot");
         } catch (Exception exception) {
             return false;
         }

@@ -545,6 +545,58 @@ public final class SoakHealthCheckRunner {
                 }
             }
 
+            // Application Settings -> Device ("Enable QC" / "Enable VA Alerts" / Notification
+            // Rules toggles): still part of the same Infra Management area as the filters above,
+            // and still under Admin - runs here, before the VMS Operator role switch below, so no
+            // role restore is needed afterward (the whole VMS Operator walk now ends straight in
+            // Logout, matching the recorded flow exactly). Config-gated; unchanged otherwise.
+            if (config.applicationSettingsEnabled()) {
+                InfraPage infra = new InfraPage(page);
+                if (infra.open()) {
+                    ApplicationSettingsPage applicationSettings = infra.openApplicationSettings();
+                    if (applicationSettings.openDevice()) {
+                        validatePage(page, result, "Application Settings - Enable QC",
+                                applicationSettings::validateEnableQc);
+                        validatePage(page, result, "Application Settings - Enable VA Alerts",
+                                applicationSettings::validateEnableVaAlerts);
+                        // Device -> Notification Rules: random toggle OFF/ON checks.
+                        if (Boolean.parseBoolean(
+                                ConfigReader.getOrDefault("soak.enable.notification.rules", "true"))) {
+                            NotificationRulesPage notificationRules = new NotificationRulesPage(page);
+                            validatePage(page, result, "Application Settings - Notification Rules",
+                                    notificationRules::runNotificationRulesFlow);
+                        }
+                    }
+                }
+            }
+
+            // Infra Management -> profile menu role switch to "VMS Operator", then the full
+            // sidebar walk in the recorded page-by-page order (Cameras/Sequence/Audit Logs/Maps/
+            // Custom Maps/Archive/Search+Bookmarks/Exports+Snapshots/Audit Logs), ending straight
+            // in Logout - matching the recorded flow exactly, with no role restore and no
+            // Application Settings in between (that already ran above, under Admin).
+            //
+            // No separate "VMS Operator - Cameras/Sequence/Audit Logs/Archive/Search/Exports"
+            // navigation-only clicks here: confirmed live, every one of the real tests below
+            // already does its own navigation to reach its page - Live_view/SequencePage/
+            // AuditLogsPage all call their own page.navigate()/navigateTo() to a specific URL
+            // (SequencePage's navigateToSequence() even re-confirms VMS Operator mode and clicks
+            // "Cameras" -> "Sequence" itself), and EventSearchValidation/ArchiveExportValidation
+            // click their own "Search"/"Bookmarks"/"Exports"/"Snapshots" tabs directly. Adding a
+            // sidebar click immediately before each of these was a real, confirmed-live bug. not
+            // "exercising the sidebar" - clicking a button and then immediately navigating away
+            // from it via a fresh page.navigate() just forces an extra full page reload, which is
+            // exactly what was bouncing this flow back through Dashboard/Infra Management between
+            // pages. Only "Custom Maps" keeps its sidebar click below: it is the one screen with
+            // no self-navigating real test of its own.
+            VmsOperatorSidebarPage vmsOperatorSidebar = new VmsOperatorSidebarPage(page);
+            boolean vmsSidebarRoleSwitchEnabled = Boolean.parseBoolean(
+                    ConfigReader.getOrDefault("soak.enable.vms.operator.sidebar", "true"));
+            boolean switchedToVmsOperator = !vmsSidebarRoleSwitchEnabled
+                    || vmsOperatorSidebar.switchRole("VMS Operator");
+            if (vmsSidebarRoleSwitchEnabled) {
+                validatePage(page, result, "Infra Management - VMS Operator Role Switch",
+                        () -> switchedToVmsOperator);
             // Infra Management -> profile menu role switch to "VMS Operator". A real recording
             // walked the full sidebar under this role (Cameras/Sequence/Audit Logs/Maps/Custom
             // Maps/Archive/Search/Exports/Audit Logs); every one of those screens except "Custom
@@ -599,14 +651,8 @@ public final class SoakHealthCheckRunner {
                 }
             }
 
-            // Execution order under liveEnabled(): Live View (stream available) -> condition-bound
-            // 10s continuous stream monitoring -> Bookmark -> Snapshot -> remaining Live View tests
-            // (My View CRUD). Live_view confirms the stream comes up (single pass, no blind waits);
-            // LiveViewMonitor then owns the actual timed monitoring window - it already existed,
-            // fully built and config-driven (soak.liveview.monitor.seconds), but was never called
-            // from anywhere, so no real monitoring window was ever run. My View CRUD used to run
-            // BEFORE Bookmark/Snapshot; it now runs after them, per the requested order - nothing
-            // about what any of these steps DO has changed, only where in the sequence CRUD runs.
+            // --- Cameras: Live View (stream available) -> condition-bound 10s continuous stream
+            // monitoring -> Snapshot -> Bookmark -> remaining Live View tests (My View CRUD). ---
             if (config.liveEnabled()) {
                 // Live View: waits only for the operator panel + camera tiles to become visible,
                 // then validates each stream once. No fixed delay before or after.
@@ -622,60 +668,71 @@ public final class SoakHealthCheckRunner {
                     captureFailureScreenshot(page, evidence, result, config, "live-view-failure.png");
                 }
 
-                // Continuous stream monitoring for the configured window (soak.liveview.monitor.seconds,
-                // default 10s): re-checks every camera's media state and any new API failure on a
-                // fixed interval until the deadline, then returns - never a blind extra wait once the
-                // window elapses. This is the actual "monitor the stream" requirement; Live View above
-                // already confirmed the stream comes up at all.
-                Page liveViewMonitorPage = page;
-                validatePage(page, result, "Live View - Stream Monitoring",
-                        () -> new LiveViewMonitor(liveViewMonitorPage).monitor().isPassed());
+                // Everything below needs a genuinely working Live View (a real camera streaming on
+                // the default grid) - Stream Monitoring just watches that same stream, and Snapshot/
+                // Bookmark/CRUD all act on "the current camera" on that same grid. When Live View
+                // itself already failed (no camera assigned, or its stream never came up), none of
+                // these can succeed either; running them anyway only pays each one's own full
+                // timeout for no result. So skip straight past this whole group and move on to
+                // Sequence, the next real test - never a blind wait on a camera that is not there.
+                if (liveViewPassed) {
+                    // Continuous stream monitoring for the configured window (soak.liveview.monitor.seconds,
+                    // default 10s): re-checks every camera's media state and any new API failure on a
+                    // fixed interval until the deadline, then returns - never a blind extra wait once the
+                    // window elapses. This is the actual "monitor the stream" requirement; Live View above
+                    // already confirmed the stream comes up at all.
+                    Page liveViewMonitorPage = page;
+                    validatePage(page, result, "Live View - Stream Monitoring",
+                            () -> new LiveViewMonitor(liveViewMonitorPage).monitor().isPassed());
 
-                // Snapshot (post-monitoring): LiveViewCrudPage's own navigateToLiveView() re-lands on
-                // the default Live View grid - a no-op when the page is already there (as it is here,
-                // since CRUD has not run yet), and needed once CRUD (below) starts leaving the page on
-                // its post-delete "My Views" list on later iterations.
-                LiveViewCrudPage liveViewBookmark = new LiveViewCrudPage(page);
-                liveViewBookmark.navigateToLiveView();
-                String snapshotName = "Testing Snapshot " + System.currentTimeMillis();
-                validatePage(page, result, "Live View - Snapshot",
-                    () -> liveViewBookmark.createSnapshotOnCurrentCamera(snapshotName));
+                    // Snapshot (post-monitoring): LiveViewCrudPage's own navigateToLiveView() re-lands on
+                    // the default Live View grid - a no-op when the page is already there (as it is here,
+                    // since CRUD has not run yet), and needed once CRUD (below) starts leaving the page on
+                    // its post-delete "My Views" list on later iterations.
+                    LiveViewCrudPage liveViewBookmark = new LiveViewCrudPage(page);
+                    liveViewBookmark.navigateToLiveView();
+                    String snapshotName = "Testing Snapshot " + System.currentTimeMillis();
+                    validatePage(page, result, "Live View - Snapshot",
+                        () -> liveViewBookmark.createSnapshotOnCurrentCamera(snapshotName));
 
-                // Bookmark (post-Snapshot): the same camera tile, right after Snapshot
-                // creation/validation above completes - no navigation, no re-selection. Structurally
-                // identical dialog to Snapshot's (confirmed live), so this reuses the SAME
-                // LiveViewCrudPage instance and its selectHumanDetectionType() helper - never a
-                // duplicated implementation.
-                String bookmarkName = "Testing Bookmark " + System.currentTimeMillis();
-                validatePage(page, result, "Live View - Bookmark",
-                        () -> liveViewBookmark.createBookmarkOnCurrentCamera(bookmarkName));
+                    // Bookmark (post-Snapshot): the same camera tile, right after Snapshot
+                    // creation/validation above completes - no navigation, no re-selection. Structurally
+                    // identical dialog to Snapshot's (confirmed live), so this reuses the SAME
+                    // LiveViewCrudPage instance and its selectHumanDetectionType() helper - never a
+                    // duplicated implementation.
+                    String bookmarkName = "Testing Bookmark " + System.currentTimeMillis();
+                    validatePage(page, result, "Live View - Bookmark",
+                            () -> liveViewBookmark.createBookmarkOnCurrentCamera(bookmarkName));
 
-                // Remaining Live View tests: "My Views -> Cameras" CRUD (My View create/update/
-                // delete) - create one view (unique name), change its grid layout, add/remove/re-add
-                // cameras from the device tree, save the configuration, save the view, rename it
-                // (update), then delete it. Runs immediately after Snapshot/Bookmark, per the
-                // requested order. LiveViewCrudPage remains a separate class from
-                // Live_view/LiveViewMonitor, neither of which it calls into.
-                if (config.liveViewCrudEnabled()) {
-                    LiveViewCrudPage liveViewCrud = new LiveViewCrudPage(page);
-                    String viewSuffix = String.valueOf(System.currentTimeMillis());
-                    String viewName = ConfigReader.getOrDefault("live.view.crud.name", "Live View") + " " + viewSuffix;
-                    String updatedViewName = viewName
-                            + ConfigReader.getOrDefault("live.view.crud.update.name.suffix", "-Update");
-                    String gridLayout = ConfigReader.getOrDefault("live.view.crud.grid.layout", "3x3");
-                    String[][] cameraPaths = parseCameraPaths(
-                            ConfigReader.getOrDefault("live.view.crud.camera.paths", ""));
-                    validatePage(page, result, "Live View - CRUD",
-                            () -> liveViewCrud.runLiveViewCrudFlow(viewName, updatedViewName, gridLayout, cameraPaths));
+                    // Remaining Live View tests: "My Views -> Cameras" CRUD (My View create/update/
+                    // delete) - create one view (unique name), change its grid layout, add/remove/re-add
+                    // cameras from the device tree, save the configuration, save the view, rename it
+                    // (update), then delete it. Runs immediately after Snapshot/Bookmark, per the
+                    // requested order. LiveViewCrudPage remains a separate class from
+                    // Live_view/LiveViewMonitor, neither of which it calls into.
+                    if (config.liveViewCrudEnabled()) {
+                        LiveViewCrudPage liveViewCrud = new LiveViewCrudPage(page);
+                        String viewSuffix = String.valueOf(System.currentTimeMillis());
+                        String viewName = ConfigReader.getOrDefault("live.view.crud.name", "Live View") + " " + viewSuffix;
+                        String updatedViewName = viewName
+                                + ConfigReader.getOrDefault("live.view.crud.update.name.suffix", "-Update");
+                        String gridLayout = ConfigReader.getOrDefault("live.view.crud.grid.layout", "3x3");
+                        String[][] cameraPaths = parseCameraPaths(
+                                ConfigReader.getOrDefault("live.view.crud.camera.paths", ""));
+                        validatePage(page, result, "Live View - CRUD",
+                                () -> liveViewCrud.runLiveViewCrudFlow(viewName, updatedViewName, gridLayout, cameraPaths));
+                    }
+                } else {
+                    LOG.warn("[SOAK] Live View failed (no working camera/stream); skipping Stream "
+                            + "Monitoring, Snapshot, Bookmark and CRUD, moving on to Sequence.");
                 }
             }
 
-            // Sequence: "VMS Operator -> Cameras -> Sequence". Create one sequence (unique name,
-            // requires at least 2 cameras - confirmed live) with cameras from the device tree,
-            // rename it, then delete it. Runs only after the existing Live View monitoring and its
-            // continuous camera/API validation above complete - never before, and never calling
-            // into Live_view or LiveViewCrudPage, both of which are left completely untouched.
-            // Additive and config-gated.
+            // --- Sequence: "VMS Operator -> Cameras -> Sequence". Create one sequence (unique
+            // name, requires at least 2 cameras - confirmed live) with cameras from the device
+            // tree, rename it, then delete it. SequencePage.navigateToSequence() reaches this
+            // screen entirely on its own (own page.navigate(), own operator-mode check, own
+            // "Cameras"/"Sequence" clicks) - no separate sidebar step needed here. ---
             if (config.sequenceEnabled()) {
                 SequencePage sequence = new SequencePage(page);
                 String sequenceSuffix = String.valueOf(System.currentTimeMillis());
@@ -689,12 +746,11 @@ public final class SoakHealthCheckRunner {
                         () -> sequence.runSequenceLifecycle(sequenceName, updatedSequenceName, sequenceCameraPaths));
             }
 
-            // Audit Logs (post-Sequence): reuses the existing AuditLogsPage untouched export flow,
-            // then searches for a run-unique value expected to match nothing (verifying "No records
-            // found"), then best-effort searches a known-existing term. Runs only after the Sequence
-            // lifecycle above completes - never before it. Additive and config-gated; independent of
-            // the earlier Audit Logs Export checks elsewhere in this runner (a separate flag), which
-            // are untouched.
+            // --- Audit Logs (post-Sequence): reuses the existing AuditLogsPage untouched export
+            // flow, then searches for a run-unique value expected to match nothing (verifying "No
+            // records found"), then best-effort searches a known-existing term. Its own
+            // navigateToLiveViewAuditLogs() reaches this screen via its own page.navigate() - no
+            // separate sidebar step needed here. ---
             if (config.auditLogsSearchEnabled()) {
                 AuditLogsPage auditLogsSearch = new AuditLogsPage(page);
                 String nonExistentSearchTerm = ConfigReader.getOrDefault("audit.logs.search.nonexistent.term",
@@ -704,8 +760,18 @@ public final class SoakHealthCheckRunner {
                         () -> auditLogsSearch.runAuditLogsSearchFlow(nonExistentSearchTerm, existingSearchTerm));
             }
 
+            // --- Maps + Custom Maps: "Map"/"Map Camera Validation" already self-navigate to
+            // /live-views/maps, so they run first, before the "Custom Maps" sidebar nav (which
+            // clicks "Maps" itself first, as a submenu-reveal step - not a repeat of this test). ---
             validatePage(page, result, "Map", () -> healthPages.validateMap(appUrl));
             validatePage(page, result, "Map Camera Validation", () -> healthPages.validateMapCameras(appUrl));
+            // No separate "Maps" step here: visitCustomMaps() below already clicks "Maps" itself
+            // first (required to reveal the "Custom Maps" submenu) - an extra standalone click here
+            // would just click the same "Maps" button twice in a row.
+            validatePage(page, result, "VMS Operator - Custom Maps", vmsOperatorSidebar::visitCustomMaps);
+
+            // --- Archive: validateArchive() reaches this screen via its own navigateTo() - no
+            // separate sidebar step needed here. ---
             validatePage(page, result, "Archive", () -> healthPages.validateArchive(appUrl));
             // Archive Camera Validation already does the whole flow in one pass: open Add Camera,
             // filter to Active, pick one random online device, add it once, then watch its stream for
@@ -720,12 +786,12 @@ public final class SoakHealthCheckRunner {
                 result.playbackStartupTimeMs = (System.nanoTime() - playbackStarted) / 1_000_000;
             }
 
-            // Event Search (Archive's own "Search"/Events tab): set a From/To date range wide
-            // enough to span two months (confirmed live: a single-month range never enables the
-            // calendar's own Apply), verify at least one result comes back, select one dynamically,
-            // and confirm its video actually plays. Runs only after Archive Camera Validation above
-            // - never before it, and never modifying ArchiveValidation itself (a separate class).
-            // Additive and config-gated.
+            // --- Search (+Bookmarks): Event Search (Archive's own "Search"/Events tab) - set a
+            // From/To date range wide enough to span two months (confirmed live: a single-month
+            // range never enables the calendar's own Apply), verify at least one result comes
+            // back, select one dynamically, and confirm its video actually plays. Then Bookmark
+            // Search, the same panel's "Bookmarks" tab. EventSearchValidation clicks "Search"/
+            // "Bookmarks" itself - no separate sidebar step needed here. ---
             if (config.eventSearchEnabled()) {
                 EventSearchValidation eventSearch = new EventSearchValidation(page);
                 validatePage(page, result, "Event Search", eventSearch::validateEventSearch);
@@ -736,40 +802,41 @@ public final class SoakHealthCheckRunner {
                 // duplicated for this, just given a second entry point. Runs only after Event Search
                 // above completes.
                 validatePage(page, result, "Bookmark Search", eventSearch::validateBookmarkSearch);
-
-                // Archive Export: Archive -> Exports -> select one export record dynamically ->
-                // Preview -> verify the preview video -> Download -> verify the downloaded file.
-                // Reuses the existing SoakUiUtils download mechanism (no second download
-                // implementation). Runs only after Event Search and Bookmark Search above complete -
-                // never modifying either of those, or ArchiveValidation. Additive and config-gated.
-                if (config.archiveExportEnabled()) {
-                    ArchiveExportValidation archiveExport = new ArchiveExportValidation(page);
-                    validatePage(page, result, "Archive Export", archiveExport::validateArchiveExport);
-
-                    // Archive Export - Snapshots: the same Exports tab's own "Snapshots" tab,
-                    // reusing the same ArchiveExportValidation instance and every shared helper it
-                    // already has (row discovery, dialog closing, download/file verification, Logs
-                    // search/clear, delete confirmation) - never a duplicated implementation, and
-                    // never modifying the Video Export flow above. Runs only after Archive Export
-                    // (Video) completes. Same config flag - no new flag needed, matching the
-                    // Event/Bookmark Search precedent.
-                        validatePage(page, result, "Archive Export - Snapshots",
-                            archiveExport::validateArchiveSnapshotExport);
-
-                    // Audit Logs (post-Snapshot): the Archive page's own "Audit Logs" navigation
-                    // button (a sibling of "Exports"), landing on /live-views/archive/audit-logs -
-                    // a distinct screen from both AuditLogsPage's Settings and Live-View-sidebar
-                    // Audit Logs flows above, neither of which is modified. Deliberately minimal:
-                    // navigate -> clear filter -> export -> verify the downloaded file, reusing
-                    // AuditLogsPage's existing clearDateTimeFilter()/exportAuditLogs()/
-                    // verifyDownloadedFile() as-is. Runs only after Archive Export - Snapshots
-                    // above completes. Same config flag - no new flag needed.
-                        AuditLogsPage archiveAuditLogs = new AuditLogsPage(page);
-                        validatePage(page, result, "Audit Logs - Archive Export",
-                            archiveAuditLogs::runArchiveAuditLogsExportFlow);
-                }
             }
 
+            // --- Exports (+Snapshots): Archive Export - Archive -> Exports -> select one export
+            // record dynamically -> Preview -> verify the preview video -> Download -> verify the
+            // downloaded file. Reuses the existing SoakUiUtils download mechanism (no second
+            // download implementation). Then Archive Export - Snapshots, the same Exports tab's
+            // "Snapshots" tab, reusing the same ArchiveExportValidation instance and every shared
+            // helper it already has. Same config flag as Event/Bookmark Search - no new flag
+            // needed, matching that precedent. ArchiveExportValidation clicks "Exports"/
+            // "Snapshots" itself - no separate sidebar step needed here. ---
+            if (config.eventSearchEnabled() && config.archiveExportEnabled()) {
+                ArchiveExportValidation archiveExport = new ArchiveExportValidation(page);
+                validatePage(page, result, "Archive Export", archiveExport::validateArchiveExport);
+                validatePage(page, result, "Archive Export - Snapshots",
+                        archiveExport::validateArchiveSnapshotExport);
+            }
+
+            // --- Audit Logs (Archive, second occurrence): the Archive page's own "Audit Logs"
+            // navigation button (a sibling of "Exports"), landing on
+            // /live-views/archive/audit-logs - a distinct screen from both AuditLogsPage's
+            // Settings and Live-View-sidebar Audit Logs flows above, neither of which is
+            // modified. Deliberately minimal: navigate -> clear filter -> export -> verify the
+            // downloaded file, reusing AuditLogsPage's existing clearDateTimeFilter()/
+            // exportAuditLogs()/verifyDownloadedFile() as-is. Same config flags as above - no new
+            // flag needed. Its own navigateToArchiveAuditLogs() reaches this screen via its own
+            // page.navigate() - no separate sidebar step needed here. ---
+            if (config.eventSearchEnabled() && config.archiveExportEnabled()) {
+                AuditLogsPage archiveAuditLogs = new AuditLogsPage(page);
+                validatePage(page, result, "Audit Logs - Archive Export",
+                        archiveAuditLogs::runArchiveAuditLogsExportFlow);
+            }
+
+            // Full VMS Operator sidebar walk complete - straight to Logout, matching the recorded
+            // flow exactly (no role restore, no Application Settings here: that already ran
+            // earlier, under Admin, before the role switch above - see there for why).
 
             // Archive/Event Search/Bookmark Search/Archive Export are the last validations; logout
             // follows immediately. Settings, Users & Roles and Organisation already ran once above, so they

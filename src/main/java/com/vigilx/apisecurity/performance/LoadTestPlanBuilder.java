@@ -10,10 +10,12 @@ import com.vigilx.apisecurity.performance.CrudLifecycleGrouper.GroupingResult;
  * Generates the "load test" JMeter plan: the same proven structure {@link JmeterPlanBuilder} already
  * uses (one Thread Group, one Header Manager carrying the token obtained once, a Constant Timer, one
  * HTTP Request sampler per API, a Simple Data Writer) plus one addition that class deliberately does
- * not have - a Response Assertion under every sampler, checking the live response code against the
- * status this exact API was actually observed returning in the real capture
+ * not have - an expected-status check under every sampler, enforcing the live response code against
+ * the status this exact API was actually observed returning in the real capture
  * ({@link ApiDefinition#sampleStatus()}). That is the "expected result" a load-test PASS/FAIL is
- * judged against - never invented, never a blanket "any 2xx".
+ * judged against - never invented, never a blanket "any 2xx". See
+ * {@link #appendResponseAssertion(StringBuilder, ApiDefinition)} for why that check is a JSR223
+ * PostProcessor and not a plain JMeter Response Assertion.
  *
  * <p>A separate class rather than a change to {@link JmeterPlanBuilder}: that class is already relied
  * on by {@code JmeterPerformanceTest}, and its own javadoc is explicit that it "never filters" and
@@ -42,14 +44,15 @@ public final class LoadTestPlanBuilder {
         appendConstantTimer(xml, profile.thinkTimeMs());
         xml.append("        <hashTree/>\n");
 
-        // Real CREATE -> UPDATE -> DELETE lifecycles first, discovered purely from the inventory's
-        // own POST-base / PUT-PATCH-DELETE-{id} shape - never a hard-coded resource list. Placed
-        // ahead of every standalone sampler so a dependent write never has a chance to run before the
-        // data it needs exists (this thread group has exactly one flat sampler sequence per
-        // iteration, executed top to bottom).
+        // Real CREATE -> UPDATE lifecycles first, discovered purely from the inventory's own
+        // POST-base / PUT-PATCH-{id} shape - never a hard-coded resource list. Placed ahead of every
+        // standalone sampler so a dependent write never has a chance to run before the data it needs
+        // exists (this thread group has exactly one flat sampler sequence per iteration, executed top
+        // to bottom). DELETE for every one of these resources is deliberately NOT emitted here - see
+        // the end-of-iteration block below.
         GroupingResult grouping = CrudLifecycleGrouper.group(getApis);
         for (CrudGroup group : grouping.groups()) {
-            appendCrudLifecycle(xml, group);
+            appendCrudCreateAndUpdate(xml, group);
         }
 
         // A captured login call (POST .../login) runs before every other standalone sampler, never
@@ -75,8 +78,16 @@ public final class LoadTestPlanBuilder {
             // assertion travels with (and only applies to) this one sampler, exactly like the JMeter
             // GUI itself nests it, never a sibling that could be mistaken for applying test-plan-wide.
             xml.append("        <hashTree>\n");
-            appendResponseAssertion(xml, definition);
-            xml.append("          <hashTree/>\n");
+            // appendResponseAssertion() writes nothing when this definition has no real captured
+            // status (sampleStatus() <= 0) - the paired closing hashTree below must only be emitted
+            // when an element actually precedes it, otherwise this sampler's hashTree starts with an
+            // orphan <hashTree/> with no element to pair it to, which corrupts the plan (confirmed
+            // live: JMeter's own XStream loader then throws "HeaderManager cannot be cast to
+            // HashTree" trying to parse it - the same duplicate/orphan-hashTree bug class the
+            // isLoginApi() comment below already describes fixing once).
+            if (appendResponseAssertion(xml, definition)) {
+                xml.append("          <hashTree/>\n");
+            }
             if (isLoginApi(definition)) {
                 // Overwrites the seeded ${accessToken} (see TestPlan.user_defined_variables above)
                 // with the real token this exact login response returned - $.accessToken is the
@@ -87,6 +98,18 @@ public final class LoadTestPlanBuilder {
                 appendJsonExtractor(xml, "accessToken", "$.accessToken");
             }
             xml.append("        </hashTree>\n");
+        }
+
+        // Every DELETE runs LAST, after every standalone sampler and every other lifecycle's
+        // CREATE/UPDATE - the true end of this thread's one iteration ("end session"), never
+        // interleaved between lifecycles the way CREATE->UPDATE->DELETE->CREATE->UPDATE->DELETE... was
+        // before. A standalone sampler (e.g. a plain GET/PUT the grouper could not tie to a captured
+        // POST, so it still carries its own original, now-stale literal id) was found live to 404
+        // precisely because an EARLIER lifecycle's DELETE had already run and removed the one real
+        // resource that iteration created - deleting everything only once nothing in this iteration can
+        // still reference it removes that ordering hazard entirely.
+        for (CrudGroup group : grouping.groups()) {
+            appendCrudDelete(xml, group);
         }
 
         xml.append("      </hashTree>\n");
@@ -155,10 +178,11 @@ public final class LoadTestPlanBuilder {
                                       String bearerToken, List<ApiDefinition> definitions,
                                       List<java.util.Map<String, String>> extraHeaders,
                                       List<String> schemes, String loginEmail, String loginPassword,
-                                      LoadProfile profile) {
+                                      String devicePassword, LoadProfile profile) {
         StringBuilder xml = new StringBuilder();
         appendPlanOpen(xml, testPlanName, bearerToken, new String[][] {
-                {"loginEmail", loginEmail}, {"loginPassword", loginPassword}});
+                {"loginEmail", loginEmail}, {"loginPassword", loginPassword},
+                {"devicePassword", devicePassword}});
         appendSinglePassThreadGroup(xml, testPlanName);
         xml.append("      <hashTree>\n");
         appendHttpDefaults(xml, defaultHost, defaultPort);
@@ -238,6 +262,20 @@ public final class LoadTestPlanBuilder {
             }
             String[] norm = d.normalizedPath().split("/", -1);
             String[] real = d.samplePath().split("/", -1);
+            // ApiNormalizer.normalizePath() drops every empty segment, so a trailing "/" never
+            // survives into normalizedPath() - but the real captured path genuinely keeps one for
+            // several routes this app actually calls with a trailing slash (e.g. "/devices/{id}/",
+            // "/users/{id}/"). That left norm.length one short of real.length for every such route,
+            // so the very next guard silently skipped id-chaining for ALL of them - confirmed live:
+            // every "/devices/{id}/..." sampler kept the literal captured device id instead of the
+            // real one this run's own POST /devices created. Strip that one trailing empty element
+            // from real (never from norm - it has none to strip) before comparing/rewriting, and put
+            // the trailing slash back on the rewritten path afterwards.
+            boolean trailingSlash = real.length == norm.length + 1 && real.length > 0
+                    && real[real.length - 1].isEmpty();
+            if (trailingSlash) {
+                real = java.util.Arrays.copyOf(real, real.length - 1);
+            }
             if (norm.length != real.length) {
                 continue;
             }
@@ -265,7 +303,7 @@ public final class LoadTestPlanBuilder {
                 }
             }
             if (rewritten) {
-                rewrittenPath[j] = String.join("/", real);
+                rewrittenPath[j] = String.join("/", real) + (trailingSlash ? "/" : "");
             }
         }
 
@@ -295,8 +333,23 @@ public final class LoadTestPlanBuilder {
                             : uniqueNames(definition, rewrittenBody[index] != null
                                     ? rewrittenBody[index] : definition.sampleRequestBody()));
             xml.append("        <hashTree>\n");
-            appendResponseAssertion(xml, definition);
-            xml.append("          <hashTree/>\n");
+            // A synthetic multipart body (above) is a placeholder, not the real captured upload - its
+            // real file bytes/boundary were never capturable (Playwright's own postData() can't return
+            // them), so this sampler can never reproduce the real captured outcome. Still replayed
+            // (exercises the endpoint for soak purposes), but never asserted on - that would only ever
+            // report a false failure, never a real one.
+            //
+            // appendResponseAssertion() also writes nothing on its own when sampleStatus() <= 0, so
+            // either way the paired closing hashTree below must only be emitted when an element was
+            // actually written - confirmed live: an unconditional one here left an orphan <hashTree/>
+            // with no preceding element on every multipart-body sampler (profile picture / logo
+            // uploads), which JMeter's own XStream loader cannot parse ("HeaderManager cannot be cast
+            // to HashTree") - this silently produced an unloadable .jmx for any soak run that captured
+            // at least one multipart upload.
+            boolean assertionWritten = multipartBody == null && appendResponseAssertion(xml, definition);
+            if (assertionWritten) {
+                xml.append("          <hashTree/>\n");
+            }
             if (headers != null && !headers.isEmpty()) {
                 xml.append("          <HeaderManager guiclass=\"HeaderPanel\" testclass=\"HeaderManager\" "
                         + "testname=\"Captured headers\" enabled=\"true\">\n");
@@ -338,16 +391,24 @@ public final class LoadTestPlanBuilder {
     }
 
     /**
-     * A create (POST) replayed with its captured {@code "name"} hits "already exists" (409). Keep the
-     * captured text but make it unique per run: a trailing timestamp-like number is replaced by
-     * ${__time()}, otherwise ${__time()} is appended. Returns the body unchanged otherwise.
+     * A create (POST) replayed with its captured {@code "name"} (or a camelCase {@code "...Name"}
+     * field, e.g. {@code "deviceName"} - confirmed live on a real captured POST /api/v1/devices body,
+     * which replayed the exact same static literal name every run and 400'd as "already exists" on
+     * every run after the first) hits "already exists" (400/409). Also {@code "role"} - confirmed
+     * live on a real captured POST /api/v1/roles body, whose label field is bare {@code "role"}, not
+     * {@code "roleName"}, so it fell through this same check and 400'd as "already exists" on every
+     * run after the first too. Keep the captured text but make it unique per run: a trailing
+     * timestamp-like number is replaced by ${__time()}, otherwise ${__time()} is appended. The key
+     * must end in a capital "Name", or be exactly "name" or "role" - deliberately excludes a
+     * lowercase compound key like {@code "username"}, a real login/device credential field, never a
+     * created record's label. Returns the body unchanged otherwise.
      */
     private static String uniqueNames(ApiDefinition definition, String body) {
         if (body == null || !"POST".equals(definition.method()) || isLoginApi(definition)) {
             return body;
         }
         java.util.regex.Matcher m = java.util.regex.Pattern
-                .compile("(\"name\"\\s*:\\s*\")([^\"]*?)(\\d{10,13})?(\")").matcher(body);
+                .compile("(\"(?:name|role|[A-Za-z]+Name)\"\\s*:\\s*\")([^\"]*?)(\\d{10,13})?(\")").matcher(body);
         StringBuffer out = new StringBuffer();
         boolean changed = false;
         while (m.find()) {
@@ -395,11 +456,15 @@ public final class LoadTestPlanBuilder {
                 + (definition.sampleQuery() == null || definition.sampleQuery().isBlank()
                         ? "" : "?" + definition.sampleQuery());
         String body = bodyOverride != null ? bodyOverride : definition.sampleRequestBody();
-        if (login && body != null) {
+        if (body != null) {
             // The captured body was secret-masked on capture (password -> ********), which can never
-            // log in on replay - the login sampler alone takes the password from the plan's own
-            // ${loginPassword} variable instead.
-            body = body.replaceAll("(\"password\"\\s*:\\s*)\"\\*+\"", "$1\"\\${loginPassword}\"");
+            // authenticate on replay. The login sampler takes the real login password from the
+            // plan's own ${loginPassword} variable; any other sampler whose body carries a masked
+            // password (confirmed live: POST .../cameras/capabilities probes the real test camera's
+            // own ONVIF credential, config.properties' device.creation.password) takes it from
+            // ${devicePassword} instead - never the literal masked text, which 400s every time.
+            String variable = login ? "loginPassword" : "devicePassword";
+            body = body.replaceAll("(\"password\"\\s*:\\s*)\"\\*+\"", "$1\"\\${" + variable + "}\"");
         }
         xml.append("        <HTTPSamplerProxy guiclass=\"HttpTestSampleGui\" testclass=\"HTTPSamplerProxy\" "
                 + "testname=\"").append(escape(position + ". " + definition.method() + " " + definition.samplePath()))
@@ -538,20 +603,27 @@ public final class LoadTestPlanBuilder {
     }
 
     /**
-     * One real CREATE -&gt; UPDATE -&gt; DELETE sequence for one resource: the CREATE sampler carries
-     * its own real captured body and a JSON Extractor that captures {@code $.id} from its real
-     * response into {@code group.variableName()}; UPDATE and DELETE (when the inventory actually
-     * captured either) use the SAME variable in place of whatever id they were originally captured
-     * with, each wrapped in an If Controller that only runs it when the id was actually captured this
-     * iteration - never a blind attempt against an empty/unresolved variable, and never a fabricated
-     * id when CREATE itself failed or returned no recognizable id.
+     * One real CREATE -&gt; UPDATE sequence for one resource: the CREATE sampler carries its own real
+     * captured body and a JSON Extractor that captures {@code $.id} from its real response into
+     * {@code group.variableName()}; UPDATE (when the inventory actually captured one) uses that SAME
+     * variable in place of whatever id it was originally captured with, wrapped in an If Controller
+     * that only runs it when the id was actually captured this iteration - never a blind attempt
+     * against an empty/unresolved variable, and never a fabricated id when CREATE itself failed or
+     * returned no recognizable id. DELETE for this same resource is handled separately by
+     * {@link #appendCrudDelete} - see its own javadoc for why.
      */
-    private static void appendCrudLifecycle(StringBuilder xml, CrudGroup group) {
+    private static void appendCrudCreateAndUpdate(StringBuilder xml, CrudGroup group) {
         ApiDefinition create = group.create();
         appendHttpSampler(xml, create, null);
         xml.append("        <hashTree>\n");
-        appendResponseAssertion(xml, create);
-        xml.append("          <hashTree/>\n");
+        // The paired closing hashTree is only emitted when appendResponseAssertion() actually wrote
+        // an element (it writes nothing for a definition with no real captured status) - an
+        // unconditional one here leaves an orphan <hashTree/> with no preceding element, which
+        // corrupts the plan (confirmed live: JMeter's own XStream loader then throws "HeaderManager
+        // cannot be cast to HashTree" trying to parse it).
+        if (appendResponseAssertion(xml, create)) {
+            xml.append("          <hashTree/>\n");
+        }
         appendJsonExtractor(xml, group.variableName());
         xml.append("        </hashTree>\n");
 
@@ -559,21 +631,36 @@ public final class LoadTestPlanBuilder {
             appendIfControllerWrapped(xml, group.variableName(), "UPDATE " + group.resourceName(), () -> {
                 appendHttpSampler(xml, group.update(), group.variableName());
                 xml.append("            <hashTree>\n");
-                appendResponseAssertion(xml, group.update());
-                xml.append("              <hashTree/>\n");
+                if (appendResponseAssertion(xml, group.update())) {
+                    xml.append("              <hashTree/>\n");
+                }
                 xml.append("            </hashTree>\n");
             });
         }
+    }
 
-        if (group.delete() != null) {
-            appendIfControllerWrapped(xml, group.variableName(), "DELETE " + group.resourceName(), () -> {
-                appendHttpSampler(xml, group.delete(), group.variableName());
-                xml.append("            <hashTree>\n");
-                appendResponseAssertion(xml, group.delete());
-                xml.append("              <hashTree/>\n");
-                xml.append("            </hashTree>\n");
-            });
+    /**
+     * DELETE for one resource, emitted at the very end of the thread's iteration (by {@link #build}'s
+     * own call site) rather than right after that same resource's CREATE/UPDATE - by explicit request:
+     * confirmed live, a standalone sampler the grouper could not tie to any captured POST (so it still
+     * carries its own original, now long-dead literal id) 404'd because an EARLIER lifecycle's DELETE
+     * had already run and removed the one real resource this iteration created, before that unrelated
+     * standalone sampler's turn came up later in the same flat sequence. Uses the exact same
+     * {@code group.variableName()} If-Controller-guarded pattern every other chained step already
+     * uses - never a blind attempt against an empty/unresolved variable.
+     */
+    private static void appendCrudDelete(StringBuilder xml, CrudGroup group) {
+        if (group.delete() == null) {
+            return;
         }
+        appendIfControllerWrapped(xml, group.variableName(), "DELETE " + group.resourceName(), () -> {
+            appendHttpSampler(xml, group.delete(), group.variableName());
+            xml.append("            <hashTree>\n");
+            if (appendResponseAssertion(xml, group.delete())) {
+                xml.append("              <hashTree/>\n");
+            }
+            xml.append("            </hashTree>\n");
+        });
     }
 
     /**
@@ -705,26 +792,43 @@ public final class LoadTestPlanBuilder {
     }
 
     /**
-     * One Response Assertion per sampler, checking {@code Assertion.response_code} equals the exact
-     * status this API was really observed returning in the capture ({@link ApiDefinition#sampleStatus()}).
-     * A definition with no real captured status (0 - never actually observed, only inferred) gets no
-     * assertion at all: asserting against a status that was never really seen would be inventing an
-     * expectation, not using one.
+     * Enforces the exact status this API was really observed returning in the capture
+     * ({@link ApiDefinition#sampleStatus()}) - a JSR223 PostProcessor, not a JMeter Response
+     * Assertion. A definition with no real captured status (0 - never actually observed, only
+     * inferred) gets no check at all: asserting against a status that was never really seen would be
+     * inventing an expectation, not using one.
+     *
+     * <p>Confirmed live: a plain Response Assertion cannot be used for this. JMeter's own
+     * HTTPSamplerProxy marks a sample {@code success=false} purely from its HTTP status code (any
+     * code &gt;= 400) the moment the response comes back - BEFORE any assertion runs - and the
+     * documented element execution order for one sampler is Pre-Processors -&gt; Timers -&gt; Sampler
+     * -&gt; Post-Processors -&gt; Assertions -&gt; Listeners: assertions run LAST and can only turn an
+     * already-successful sample unsuccessful, never the reverse. So a captured API that legitimately
+     * returns e.g. 400/404/409 (a validation error, a lookup miss, a conflict check - all real,
+     * intentional captured behavior) kept showing up as a failed row in the JTL - with no assertion
+     * failure message at all, since the assertion itself matched fine - purely because of that base
+     * sampler verdict no assertion could undo. A JSR223 PostProcessor is the one element type that
+     * can: it calls {@code prev.setSuccessful(...)} directly, in both directions, so the final verdict
+     * is exactly "real code == captured code" - nothing invented, nothing silently stuck at false.
      */
-    private static void appendResponseAssertion(StringBuilder xml, ApiDefinition definition) {
+    private static boolean appendResponseAssertion(StringBuilder xml, ApiDefinition definition) {
         if (definition.sampleStatus() <= 0) {
-            return;
+            return false;
         }
-        xml.append("          <ResponseAssertion guiclass=\"AssertionGui\" testclass=\"ResponseAssertion\" "
-                + "testname=\"Expected status ").append(definition.sampleStatus()).append("\" enabled=\"true\">\n");
-        xml.append("            <collectionProp name=\"Asserion.test_strings\">\n");
-        xml.append("              <stringProp name=\"49586\">").append(definition.sampleStatus()).append("</stringProp>\n");
-        xml.append("            </collectionProp>\n");
-        xml.append("            <stringProp name=\"Assertion.custom_message\"></stringProp>\n");
-        xml.append("            <stringProp name=\"Assertion.test_field\">Assertion.response_code</stringProp>\n");
-        xml.append("            <boolProp name=\"Assertion.assume_success\">false</boolProp>\n");
-        xml.append("            <intProp name=\"Assertion.test_type\">8</intProp>\n");
-        xml.append("          </ResponseAssertion>\n");
+        String expected = String.valueOf(definition.sampleStatus());
+        String script = "if (String.valueOf(prev.getResponseCode()).equals(\"" + expected + "\")) { "
+                + "prev.setSuccessful(true); } else { prev.setSuccessful(false); "
+                + "prev.setResponseMessage(\"Expected status " + expected + " but got \" + "
+                + "prev.getResponseCode()); }";
+        xml.append("          <JSR223PostProcessor guiclass=\"TestBeanGUI\" testclass=\"JSR223PostProcessor\" "
+                + "testname=\"Expected status ").append(expected).append("\" enabled=\"true\">\n");
+        xml.append("            <stringProp name=\"cacheKey\">true</stringProp>\n");
+        xml.append("            <stringProp name=\"filename\"></stringProp>\n");
+        xml.append("            <stringProp name=\"parameters\"></stringProp>\n");
+        xml.append("            <stringProp name=\"script\">").append(escape(script)).append("</stringProp>\n");
+        xml.append("            <stringProp name=\"scriptLanguage\">groovy</stringProp>\n");
+        xml.append("          </JSR223PostProcessor>\n");
+        return true;
     }
 
     private static void appendResultCollector(StringBuilder xml) {
